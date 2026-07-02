@@ -60,7 +60,7 @@
 | **Worker Pool** | Processus/threads worker qui consomment la file et exécutent le pipeline de récupération (tâches CPU/IO lourdes). |
 | **Recovery Pipeline** | Orchestration des étapes `probe → repair → slice-encode` en déléguant à la **méthode** (plugin) choisie. |
 | **Media Registry** | Référentiel des fichiers source, références, métadonnées de diagnostic (indexés par hash/chemin). |
-| **Result Store** | Stocke les sorties par tranche (1 min / 5 min / intégrale) + logs, réutilisables (cache preview). |
+| **Result Store** | Stocke l'**artefact « source réparée »** (clé `(source_hash, method_id, reference_hash)` — payé une fois, cf. §3.2) **et** les tranches dérivées (1/5/intégrale) + logs. Cœur du cache qui rend les previews instantanées. |
 
 ---
 
@@ -96,33 +96,46 @@ interface RecoveryMethod:
 
 ### 2.2 Étapes standard du pipeline
 
+> **⚠️ Modèle de coût — validé par le Spike 01 (`docs/spike/spike-01-untrunc.md`).**
+> Le `repair` (untrunc) coûte **O(taille du fichier)**, **PAS** O(tranche) : untrunc n'a **aucune notion de tranche**, il rescanne l'intégralité du `mdat` pour reconstruire le `moov` **complet**. Ce coût est **plein, payé une seule fois**, puis **mis en cache** (artefact « source réparée »). Ensuite, **chaque tranche** est un simple `ffmpeg -c copy` **quasi gratuit** (~0,2 s, O(tranche)).
+
 ```
-[probe] ──▶ [repair] ──▶ [slice-encode] ──▶ [validate] ──▶ [publish]
+[probe] ──▶ [repair (UNE FOIS, O(fichier), → CACHE)] ──▶ [slice-copy (O(tranche))] ──▶ [validate] ──▶ [publish]
+                     │                                          ▲
+                     └── artefact "source réparée" ─────────────┘  (réutilisé par toutes les tranches + extend)
 ```
 
 1. **probe** — (re)confirme le diagnostic, extrait les paramètres nécessaires à la méthode (offsets `mdat`, params codec, layout des pistes). Peut réutiliser la sortie de l'Analysis Service.
-2. **repair** — cœur de la méthode : reconstruit l'index/`moov` (via référence pour untrunc-moov) ou remuxe, produisant un **flux/fichier lisible** ou une **table d'échantillons** exploitable.
-3. **slice-encode** — matérialise la **tranche demandée** (voir §3) : extrait les N premières minutes en réutilisant au maximum les flux (copy) sans réencoder si possible.
+2. **repair (UNE FOIS, caché)** — cœur de la méthode : reconstruit le `moov` **complet** (untrunc, via référence) en scannant **tout** le `mdat`, produisant un **MP4 réparé intégral** = l'**artefact « source réparée »**. **Coût plein O(fichier), payé une seule fois** ; le résultat est stocké et **indexé par `(source_hash, method_id, reference_hash)`** (voir §3.2). Si l'artefact existe déjà en cache pour ce triplet → **étape sautée** (cache hit).
+3. **slice-copy** — matérialise la **tranche demandée** (voir §3) **par `ffmpeg -c copy` sur l'artefact réparé** : extrait `[start, +durée]` sans réencodage. **O(tranche), quasi gratuit.** Le réencodage n'a lieu **que** si l'utilisateur demande explicitement un autre format d'export.
 4. **validate** — vérifie que la sortie est décodable (ffprobe), durée cohérente, pistes présentes selon le périmètre média.
-5. **publish** — enregistre la sortie dans le Result Store (indexée par `source × méthode × périmètre × tranche`) + logs, et notifie le Job Manager.
+5. **publish** — enregistre la tranche dans le Result Store (indexée par `source × méthode × référence × périmètre × tranche`) + logs, et notifie le Job Manager.
 
-Le **périmètre média** (son seul / vidéo seule / les deux) est passé en `options` et appliqué au **mapping des pistes** lors du `slice-encode` (sélection des streams à conserver).
+Le **périmètre média** (son seul / vidéo seule / les deux) est passé en `options` et appliqué au **mapping des pistes** lors du `slice-copy` (sélection des streams à conserver via `-map`), toujours en copie de flux.
 
 ---
 
-## 3. Mécanisme de PREVIEW par tranche (sans recompiler l'intégrale)
+## 3. Mécanisme de PREVIEW par tranche (le repair est payé UNE fois, les tranches sont gratuites)
 
-### 3.1 Principe
-Le coût du traitement doit être **proportionnel à la tranche demandée**, pas à la durée totale du rush. On ne reconstruit/encode que ce qui est nécessaire aux N premières minutes.
+### 3.1 Principe (corrigé — Spike 01)
+> **Le coût n'est PAS proportionnel à la tranche.** Le `repair` untrunc coûte **O(taille du fichier)** (rescan intégral du `mdat`, reconstruction du `moov` complet) — identique que l'utilisateur vise 1 min ou l'intégrale. **Mais** ce coût est **payé une seule fois** et **mis en cache** sous forme d'un **artefact « source réparée »** (MP4 complet, index reconstruit, `mdat` d'origine préservé). **Ensuite**, produire n'importe quelle tranche (1 min / 5 min / intégrale) = un `ffmpeg -c copy` sur cet artefact → **~0,2 s, O(tranche), sans réencodage** (mesuré : ~25× plus rapide qu'un réencodage).
 
-### 3.2 Techniques
-- **Bornage temporel à la source** : le `slice-encode` limite la sortie à `[0, N min]` (`-t`/durée) et, quand la méthode le permet, **borne aussi la lecture d'entrée** pour ne pas décoder au-delà.
-- **Stream copy prioritaire** : si la reconstruction produit un conteneur lisible avec le même codec, la tranche est extraite en **copie de flux** (`-c copy`) → quasi instantané, pas de réencodage.
-- **Reconstruction d'index partielle** : pour untrunc-moov, il suffit de reconstruire la portion de la table d'échantillons couvrant la tranche + garantir un point de départ décodable (démarrer sur un keyframe / début de GOP).
-- **Cache de previews** : `Result Store` indexe chaque sortie par `(source_hash, method_id, media_scope, slice)`. Rebasculer sur une tranche déjà générée = **service instantané depuis le cache** (les `SliceTabs` de l'UI s'appuient dessus).
-- **Escalade 1 → 5 → intégrale** : l'extension réutilise les paramètres validés ; seule la **durée cible** change. La preview 1 min sert de garantie avant d'engager le coût de l'intégrale.
+Le bénéfice « preview rapide » vient donc **du cache de l'artefact réparé**, pas d'un repair partiel (qui est impossible avec untrunc). C'est le **pilier BLOQ-3**.
 
-### 3.3 Modèle `slice_spec`
+### 3.2 Cache de l'artefact « source réparée » (pilier — BLOQ-3)
+- **Clé de cache : `(source_hash, method_id, reference_hash)`.** Ce triplet identifie de façon déterministe le résultat du repair (même source + même méthode + même référence ⇒ même artefact réparé).
+- L'artefact = **MP4 réparé intégral**, stocké dans le Result Store (fichier sur volume monté, métadonnées en base).
+- **Réutilisé par TOUT** : les 3 tranches (1 min / 5 min / intégrale), l'endpoint `extend`, et toute relance de la même conf. Aucune de ces opérations ne re-paie le repair — elles font toutes un `-c copy` sur l'artefact caché.
+- **Cache hit** : si le triplet existe déjà, l'étape `repair` est **sautée** ; le job passe directement en `slice-copy` (statut de progression « source déjà réparée — extraction de la tranche »).
+- **⚠️ Anti-pattern évité** : sans ce cache, chaque changement d'onglet de tranche (`SliceTabs`) ou chaque `extend` re-lancerait un repair O(fichier) complet — plusieurs minutes sur un gros rush. Le cache est **obligatoire**, pas une optimisation.
+
+### 3.3 Extraction de tranche (slice-copy)
+- **Stream copy exclusif** : la tranche est extraite en **copie de flux** (`-c copy`) depuis l'artefact réparé → quasi instantané, pas de réencodage. `[start, +durée]` bornés (`-ss` / `-t`).
+- **Périmètre média** appliqué par `-map` (garder audio / vidéo / les deux), toujours en copie.
+- **Cache de tranches** (2ᵉ niveau, optionnel) : le Result Store peut aussi indexer les tranches par `(…, media_scope, slice)` pour resservir une tranche déjà extraite instantanément ; mais même sans, la ré-extraction reste ~0,2 s.
+- **Escalade 1 → 5 → intégrale / `extend`** : ne change que la **durée cible** du `-c copy` sur le **même artefact réparé** déjà en cache. La preview 1 min sert de garantie avant d'exposer l'intégrale — **l'intégrale ne re-paie jamais le repair**.
+
+### 3.4 Modèle `slice_spec`
 ```
 slice_spec = { kind: "1min" | "5min" | "full", start: 0, duration_s: 60 | 300 | null }
 ```
@@ -163,7 +176,7 @@ Job {
 - File FIFO avec priorité simple (previews courtes prioritaires sur intégrales longues, optionnel).
 - **Concurrence bornée** (nb de workers = fonction des CPU dispo, configurable) car ffmpeg est CPU-intensif.
 - **Annulation** : signal au worker → arrêt propre du sous-process (ffmpeg/untrunc) + statut `canceled`.
-- **Idempotence / dédup** : un job identique `(source, method, scope, slice)` déjà `succeeded` renvoie le résultat caché sans relancer.
+- **Idempotence / dédup à deux niveaux** : (1) **repair** — si l'artefact réparé `(source_hash, method_id, reference_hash)` existe (§3.2), l'étape repair est **sautée** (le coûteux) ; (2) **tranche** — un job `(…, scope, slice)` déjà `succeeded` renvoie la tranche cachée. Un changement de tranche/scope ne re-paie **jamais** le repair.
 - **Progression** : le worker émet des events (`step`, `percent`) → Job Manager → poussés au frontend via **SSE** (ou WebSocket). Fallback **polling** `GET /jobs/{id}`.
 
 ---
@@ -185,7 +198,9 @@ Toutes les réponses JSON suivent une **enveloppe commune** (§6).
 | Méthode | Route | Rôle |
 |---------|-------|------|
 | `GET` | `/api/methods` | Liste les méthodes pluggables + capacités |
-| `GET` | `/api/methods/applicable?source={id}` | Méthodes applicables au diagnostic (triées par confiance) |
+| `GET` | `/api/methods/applicable?source={id}` | Méthodes applicables au diagnostic (triées par confiance) + **`requires_reference`** de la 1re méthode |
+
+> **Chaînage front (MAJ-9)** : le front appelle `/api/methods/applicable` **dès le diagnostic**, y compris en mode Auto, pour lire `requires_reference` de la méthode la plus probable et **piloter l'affichage conditionnel** de `ReferenceFileInput` (`02` A3) — la réponse expose donc explicitement ce champ, pas seulement au moment du job.
 
 ### Jobs
 | Méthode | Route | Rôle |
@@ -194,7 +209,7 @@ Toutes les réponses JSON suivent une **enveloppe commune** (§6).
 | `GET`  | `/api/jobs/{id}` | État + progression + résultat |
 | `GET`  | `/api/jobs/{id}/events` | Flux **SSE** de progression temps réel |
 | `POST` | `/api/jobs/{id}/cancel` | Annule le job |
-| `POST` | `/api/jobs/{id}/extend` | Relance la même conf en **intégrale** (crée un job enfant) |
+| `POST` | `/api/jobs/{id}/extend` | Étend en **intégrale** (job enfant) — **réutilise l'artefact réparé en cache** (`repair` sauté), simple `-c copy` |
 | `POST` | `/api/jobs/{id}/verdict` | Enregistre le verdict humain (`ok`/`ko` + qualifs) |
 
 ### Résultats & historique
@@ -247,7 +262,7 @@ POST /api/jobs
   "estimated_duration_s": 2412,
   "tracks": [ {"type":"video","...":"..."}, {"type":"audio"} ],
   "recoverable": true,
-  "recommendation": "reference_advised"
+  "recommendation": "reference_required"   // sans référence compatible : récupération non fiable (Spike 01)
 }
 ```
 
@@ -261,9 +276,10 @@ data: {"job_id":"job_123","step":"slice-encode","percent":62,"eta_s":18}
 
 ## 7. Stockage & données
 
-- **Media Registry / Result Store** : métadonnées légères en base (SQLite suffit en local, PostgreSQL si besoin de robustesse) ; **fichiers média sur volume Docker monté** (jamais en base).
-- Arborescence sorties : `/<work>/{source_hash}/{method}/{scope}/{slice}.mp4` + `logs/`.
-- Nettoyage : politique de rétention configurable (previews jetables, sorties intégrales conservées).
+- **Media Registry / Result Store** : métadonnées légères en base (SQLite) ; **fichiers média sur volume Docker monté** (jamais en base).
+- **Artefact « source réparée » (clé de voûte du cache, BLOQ-3)** : `/<work>/{source_hash}/{method}/{reference_hash}/repaired.mp4` — produit **une seule fois** par le `repair`, réutilisé par toutes les tranches et par `extend`.
+- Arborescence tranches (dérivées de l'artefact, en `-c copy`) : `/<work>/{source_hash}/{method}/{reference_hash}/slices/{scope}/{slice}.mp4` + `logs/`.
+- **Rétention** : l'**artefact réparé** est le plus coûteux à recalculer → conservé en priorité (c'est lui qui évite de re-payer le repair O(fichier)) ; les tranches dérivées sont jetables (régénérables en ~0,2 s). Politique configurable.
 
 ---
 
@@ -278,9 +294,9 @@ data: {"job_id":"job_123","step":"slice-encode","percent":62,"eta_s":18}
 | **Traitement média** | **ffmpeg / ffprobe** + **untrunc** (`anthwlock/untrunc`) + libs conteneur MP4/MXF | Standards de fait ; untrunc = reconstruction moov via référence (cf. `04`). Outils CLI faciles à conteneuriser. |
 | **Langage backend** | **Python 3.12** | Écosystème média mature, orchestration de sous-process ffmpeg simple, prototypage rapide, large communauté ; adapté à une V1. |
 | **Framework API** | **FastAPI** | Async natif (SSE/WebSocket), validation (Pydantic) alignée avec l'enveloppe JSON, OpenAPI auto-généré. |
-| **Jobs asynchrones** | **Celery + Redis** (ou **RQ + Redis** pour rester léger) | Découple les jobs lourds du cycle HTTP, workers scalables, annulation supportée. RQ suffit pour la V1 locale ; Celery si montée en charge. |
+| **Jobs asynchrones** | **File in-process : `ProcessPoolExecutor` + état en SQLite** (Redis/RQ écarté en V1) | **Arbitrage MIN-5** (voir §8.4). Poste **local mono-utilisateur**, jobs courts et peu nombreux → un broker distribué (Redis) est **surdimensionné**. Un pool de process suffit pour paralléliser ffmpeg/untrunc et supporter l'annulation ; l'état/progression vit dans SQLite. **Un service Docker en moins.** Redis+RQ reste la porte de sortie si multi-utilisateur/scaling (§8.4). |
 | **Progression temps réel** | **SSE** (via FastAPI) + fallback polling | Simple, unidirectionnel (serveur→client), suffisant pour barre de progression ; WebSocket en option. |
-| **Base de métadonnées** | **SQLite** (V1 local) → PostgreSQL si besoin | Zéro admin en local, fichier unique dans le volume ; migration Postgres possible. |
+| **Base de métadonnées** | **SQLite** (V1 local) → PostgreSQL si besoin | Zéro admin en local, fichier unique dans le volume ; sert aussi de **magasin d'état des jobs** (couplé au ProcessPool). Migration Postgres possible. |
 | **Frontend** | **React + TypeScript** (Vite) | Lecteur HTML5, état de job réactif, composants de `02` ; TS pour la robustesse du contrat API. |
 | **Lecteur** | `<video>` HTML5 + support **Range requests** côté API | Streaming des previews sans télécharger tout le fichier. |
 | **Conteneurisation** | **Docker** multi-services via **docker-compose** | Portable, local. |
@@ -288,22 +304,33 @@ data: {"job_id":"job_123","step":"slice-encode","percent":62,"eta_s":18}
 ### 8.2 Découpage conteneurs (docker-compose)
 ```
 services:
-  api        # FastAPI (gateway + analysis + job manager API)
-  worker     # Worker(s) média : ffmpeg + untrunc + pipeline (image "lourde")
-  redis      # broker/queue + cache progression
-  web        # frontend statique (build React) servi par nginx (ou par api)
+  app        # FastAPI + ProcessPool worker embarqué : ffmpeg + untrunc + pipeline
+             # (image "lourde" : embarque les binaires média ; sert aussi l'API + SSE)
+  web        # frontend statique (build React) servi par nginx (ou directement par app)
 volumes:
-  media:     # fichiers source, références, sorties (monté par api + worker)
-  db:        # SQLite / données
+  media:     # fichiers source, références, artefact réparé, tranches (monté par app)
+  db:        # SQLite (métadonnées + état des jobs)
 ```
-- L'image **worker** embarque ffmpeg + untrunc compilé → c'est là que vit le traitement lourd, isolé et scalable (`--scale worker=N`).
-- L'image **api** reste légère (pas de binaire média requis pour router/valider).
+- **Pas de service Redis en V1** (cf. §8.4) : la file de jobs est **in-process** dans le conteneur `app` via `ProcessPoolExecutor`, l'état persiste en SQLite. **Deux services au lieu de quatre.**
+- L'image `app` embarque **ffmpeg (version figée, cf. §8.5) + untrunc compilé** → traitement lourd isolé.
+- **Contrainte ffmpeg (Spike 01 / DockerManager)** : figer **ffmpeg ≤ 8.0** dans l'image untrunc — untrunc avertit que **ffmpeg > 8.1 casse la struct interne `FFCodec`** (comportement indéfini). Ne pas laisser flotter la version (voir §8.5).
 - **DockerManager** (rôle squad) finalisera Dockerfiles/compose ; ici on fixe le **découpage** et les **frontières**.
+- **Note scaling** : si l'on doit un jour paralléliser sur plusieurs conteneurs, on ré-externalise le worker + réintroduit un broker (§8.4). Le contrat API et le pipeline ne changent pas.
 
 ### 8.3 Alternatives envisagées (non retenues, tracées)
 - **Node.js/Express** backend : viable, bon pour SSE, mais Python garde l'avantage sur l'outillage média/scripting ffmpeg. → gardé en alternative.
 - **Go** worker : excellent pour perf/concurrence et binaire unique, mais surcoût de dev en V1 ; envisageable pour un worker haute perf plus tard.
-- **Celery vs RQ** : RQ recommandé pour démarrer (simplicité), Celery si besoins avancés (retries, routing, scheduling).
+
+### 8.4 Arbitrage MIN-5 — file in-process vs Redis+RQ
+- **Décision : file in-process (`ProcessPoolExecutor` + SQLite) pour la V1.**
+- **Pourquoi** : le contexte est un **poste local mono-utilisateur** ; le Spike 01 montre que les jobs sont **courts en absolu** (repair borné par l'I/O du fichier, tranches ~0,2 s) et peu concurrents. Un **broker distribué (Redis) + RQ/Celery** apporterait un service Docker supplémentaire, un point d'exploitation et une complexité **sans bénéfice** à cette échelle.
+- **Ce qu'on garde quand même** : découplage du cycle HTTP (le worker tourne hors requête), annulation (kill du sous-process ffmpeg/untrunc), progression persistée (SQLite → SSE).
+- **Seuil de bascule vers Redis+RQ** : multi-utilisateur simultané, besoin de workers sur plusieurs machines/conteneurs, ou files longues avec retries/routing avancés. La frontière `RecoveryMethod`/API rend cette bascule **non-bloquante** (§9).
+
+### 8.5 Contrainte outillage média (pour DockerManager)
+- **ffmpeg ≤ 8.0** figé dans l'image untrunc (au-delà de 8.1, struct `FFCodec` cassée → untrunc instable). Build untrunc via le **Dockerfile officiel `anthwlock/untrunc`** (Ubuntu + ffmpeg compatible), comme dans le Spike 01.
+- **Support Sony natif** : untrunc expose l'option **`-rsv-ben` — « RSV file recovery (Sony recording-in-progress files) »** et un `src/rsv.cpp` dédié → à exploiter par la méthode `untrunc-moov` (voir `04`).
+- Usage untrunc : `untrunc <reference_saine.mp4> <fichier_casse.rsv>` (la **référence est le 1er argument**), sortie `<casse>_fixed.mp4`.
 
 ---
 

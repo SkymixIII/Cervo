@@ -9,8 +9,14 @@
 - **Compétence technique** : variable. L'UX ne doit **jamais** exiger de connaître « moov atom », « untrunc » ou « MXF ». Ces notions restent internes, exposées seulement en libellés simples et en mode « avancé ».
 - **Environnement** : app web servie par un conteneur Docker **local** (LAN / localhost). Les fichiers sont sur le même hôte ou un partage monté.
 
-### Principe UX directeur
-> **« Preview d'abord, intégrale ensuite. »** On ne recompile jamais tout un rush pour découvrir que la méthode ne marche pas. On valide sur une **tranche courte (1 min)**, puis on étend.
+### Principe UX directeur (corrigé — Spike 01)
+> **« Réparer une fois, prévisualiser autant qu'on veut. »**
+
+**Ce qui est vrai (et qu'il faut dire honnêtement à l'utilisateur) :**
+- La **réparation** (reconstruction de l'index/`moov`) prend **le même temps quelle que soit la tranche** demandée : elle dépend de la **taille du fichier**, pas de la durée qu'on veut voir. Sur un **gros rush 4K**, cette étape peut durer **plusieurs minutes** (lecture du fichier entier). ⚠️ **Ne pas promettre « preview 1 min = rapide parce qu'on ne traite qu'1 min » — c'est faux.**
+- **En revanche**, cette réparation n'est **payée qu'une seule fois** puis **mise en cache**. **Après** elle, **toutes les previews (1 min / 5 min / intégrale) sont quasi instantanées** (~0,2 s) et **basculer d'une tranche à l'autre est gratuit**.
+
+**Traduction produit :** l'attente est **en amont, une fois** (« Réparation en cours… »), pas à chaque changement de tranche. Le choix de tranche sert donc surtout à **valider vite le résultat visuellement** et à **borner l'export final**, pas à réduire le temps de réparation. La copie « son seul / vidéo seule / les deux » et l'extension à l'intégrale se font toutes **sans re-réparer**.
 
 ---
 
@@ -74,16 +80,22 @@ Le point clé : les étapes **[6]→[8]** tournent d'abord sur la **tranche 1 mi
 
 ### [4] Choix de la tranche
 - 3 options exclusives : **1 min** / **5 min** / **Intégrale**.
-- **Défaut = 1 min** (aligné sur le principe directeur : itérer vite).
-- Libellé pédagogique : « Testez sur 1 min avant de lancer l'intégrale — c'est bien plus rapide. »
+- **Défaut = 1 min** : sert à **vérifier visuellement le résultat vite** après réparation, pas à réduire le temps de réparation.
+- Libellé pédagogique **honnête** : « La réparation prend le même temps quelle que soit la tranche. Choisir 1 min permet juste de **contrôler le rendu** avant d'exposer/exporter l'intégrale — l'affichage, lui, est instantané. »
+- ⚠️ Ne **pas** laisser croire que 1 min = réparation plus rapide (cf. §0). Si le rush est volumineux, l'écran de progression annonce clairement que la réparation peut durer plusieurs minutes, **une seule fois**.
 - La tranche = les **N premières minutes** du média récupérable (offset 0 par défaut ; un offset de départ est une évolution possible mais hors périmètre V1).
 
-### [5] Fichier de référence (conditionnel)
-- Affiché **uniquement** si la méthode de récupération sélectionnée en a besoin (cas untrunc / reconstruction moov).
+### [5] Fichier de référence (quasi obligatoire — Spike 01)
+> **Constat validé par le Spike 01 : sans référence, on ne récupère RIEN — pas même le son.** Un fichier réellement privé de `moov` ne peut pas être démuxé par ffmpeg seul (aucun index pour localiser les samples du `mdat`). La reconstruction du `moov` par untrunc **exige** une référence saine. Le fallback « son seul sans référence » de la conception initiale est **invalidé** (cf. `04` §3.2).
+
+- **La référence n'est donc pas un « plus » optionnel : elle est la condition de la récupération.** L'UX doit la traiter comme **presque toujours requise**, pas comme une case avancée.
+- **Chaînage technique (résout MAJ-9)** : dès le diagnostic [2], le front appelle **`GET /api/methods/applicable?source={id}`** pour connaître la méthode la plus probable **même en mode Auto** (où la méthode n'est résolue côté serveur qu'au lancement). C'est cette réponse qui décide d'afficher `ReferenceFileInput` et de le marquer requis — le front n'improvise pas cette logique.
 - Même UX de saisie qu'en [1] (chemin ou upload).
-- Aide contextuelle : « Une vidéo **saine**, tournée avec la **même caméra et les mêmes réglages** (codec, résolution, framerate). Pas besoin qu'elle ait la même durée. »
-- Le backend **valide la compatibilité** référence↔abîmé (même codec/conteneur/profil) et alerte si incompatible **avant** de lancer.
-- Si aucune méthode nécessitant une référence n'est retenue (méthode auto « best-effort » sans référence), l'étape est sautée.
+- **Aide à *trouver* une référence (priorité produit)** : puisqu'elle est critique, l'UX assiste activement —
+  - suggestion : « Cherchez une vidéo **saine** de la **même carte / même dossier / même caméra et réglages** (codec, résolution, framerate). Pas besoin de la même durée. »
+  - piste d'évolution : **scan automatique du dossier/carte du fichier abîmé** pour proposer des candidats compatibles.
+- **Compatibilité affichée comme estimation, pas garantie (MAJ-6)** : le backend compare codec/conteneur/profil/résolution/fps et affiche **« probablement compatible »** plutôt qu'un ✓ binaire — untrunc reste sensible à des paramètres plus fins (firmware, GOP, bitrate mode) non vérifiables à ce stade. On évite le faux espoir d'un ✓ qui échouerait ensuite.
+- Cas « aucune référence disponible » : l'UX l'annonce franchement comme **fortement compromis** et oriente vers la recherche d'une référence (plutôt que de promettre une récupération best-effort qui ne tient pas). *(Piste à spiker : untrunc `-rsv-ben` / `-sm search mdat` sans référence externe — non validé, cf. `04`.)*
 
 ### [6] Lancement de la tentative
 - Bouton « Lancer la récupération ».
@@ -92,7 +104,8 @@ Le point clé : les étapes **[6]→[8]** tournent d'abord sur la **tranche 1 mi
 - La **méthode** peut être choisie explicitement (mode avancé) ou laissée en **« Auto (recommandée) »** : le backend sélectionne la 1re méthode applicable selon le diagnostic.
 
 ### [7] Feedback de progression (temps réel)
-- Barre de progression + statut lisible : `En file` → `Analyse` → `Reconstruction` → `Encodage tranche` → `Terminé`.
+- Barre de progression + statut lisible : `En file` → `Analyse` → `Réparation (une seule fois, peut durer plusieurs min sur gros rush)` → `Extraction de la tranche (copie, quasi instantané)` → `Terminé`.
+- Si la source a **déjà été réparée** (cache présent), l'étape « Réparation » est **sautée** et affichée comme telle (« Source déjà réparée — extraction… ») → la tranche apparaît en ~0,2 s.
 - Journal simplifié (étapes franchies), avec accès à un **log technique détaillé** repliable (mode avancé).
 - Estimation de temps restant si disponible.
 - Action **Annuler** possible à tout moment (le job s'arrête proprement).
@@ -111,9 +124,9 @@ Le point clé : les étapes **[6]→[8]** tournent d'abord sur la **tranche 1 mi
 
 ### [9] Extension à l'intégrale / Export
 - Proposé après un verdict **« ça marche »** sur une tranche courte.
-- Bouton **« Récupérer l'intégralité »** : relance la **même méthode + mêmes réglages validés**, mais sur la durée **intégrale**.
+- Bouton **« Récupérer l'intégralité »** : **réutilise l'artefact déjà réparé** (en cache depuis la preview) et n'en extrait que l'intégralité en **copie de flux** → **la réparation n'est PAS refaite**, l'export est quasi immédiat.
 - À la fin : **téléchargement** du fichier réparé (ou chemin de sortie sur le volume monté) + récapitulatif (durée, pistes, méthode utilisée).
-- La preview 1 min ayant validé l'approche, l'intégrale a une très forte probabilité de réussir → pas de recompilation « à l'aveugle ».
+- La preview 1 min ayant validé l'approche **sur le même artefact réparé**, l'intégrale est déjà garantie (aucune recompilation « à l'aveugle », aucun second repair).
 
 ### [10] Relance avec méthode alternative
 - Accessible depuis un échec **[8b]** ou un verdict négatif **[8a]**.
@@ -154,12 +167,12 @@ Le point clé : les étapes **[6]→[8]** tournent d'abord sur la **tranche 1 mi
 ## 5. Boucle d'itération résumée (le cœur du produit)
 
 ```
-Choisir méthode ─▶ Tester sur 1 min ─▶ Visionner ─▶ Verdict
-      ▲                                                  │
-      │                                                  ▼
-      └──── « ça ne marche pas » ◀──────────────  « ça marche » ─▶ Étendre à l'intégrale ─▶ Export
-        (méthode alternative,
-         historique mis à jour)
+Choisir méthode ─▶ Réparer (1×, cache) ─▶ Voir 1 min ─▶ Visionner ─▶ Verdict
+      ▲                                                                  │
+      │                                                                  ▼
+      └──── « ça ne marche pas » ◀──────────  « ça marche » ─▶ Étendre à l'intégrale ─▶ Export
+        (méthode alternative =                              (réutilise l'artefact réparé,
+         nouvelle réparation)                                 aucun second repair)
 ```
 
-Cette boucle courte, peu coûteuse en calcul, est la **valeur centrale** de MediaNotFound face aux outils « tout ou rien ».
+**Nuance de coût (Spike 01) :** une fois une méthode réparée, la boucle **verdict → tranche → extend → export** est **quasi gratuite** (tout dérive de l'artefact caché). En revanche, **changer de méthode** relance une réparation O(fichier) (nouvelle clé de cache `(source, méthode, référence)`) — c'est le seul point coûteux, assumé et signalé à l'utilisateur. La **valeur centrale** de MediaNotFound reste : **réparer une fois, itérer et exporter sans recompiler**, face aux outils « tout ou rien ».

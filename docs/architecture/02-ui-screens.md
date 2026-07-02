@@ -45,16 +45,25 @@ Vues secondaires : **Modale « Méthodes alternatives »**, **Modale « Log tech
 - États : vide / en analyse (spinner) / analysé (résumé) / erreur (chemin invalide).
 
 ### A2. Panneau « Diagnostic » (sortie de l'analyse)
-- **Composant `DiagnosticCard`** (lecture seule) :
-  - Badges d'état : `mdat détecté ✅`, `moov manquant ⚠️`, conteneur (`MP4`/`MXF`), codec présumé (`XAVC-S`…).
-  - Métadonnées : durée estimée, taille, résolution/fps si détectés.
-  - Ligne de **recommandation** (ex. « Fournir un fichier de référence conseillé »).
-- Mode avancé : dump structurel repliable (liste des atomes/boxes trouvés).
+- **Composant `DiagnosticCard`** (lecture seule) — **le vocabulaire des badges dépend du conteneur détecté (MAJ-5)** : MP4 et MXF n'ont **pas** la même structure, le composant ne doit pas supposer « moov/mdat » partout.
+- **Mapping conteneur → vocabulaire des badges** :
+
+  | Conteneur | Badges « données » / « index » | Symptôme de corruption typique |
+  |-----------|-------------------------------|--------------------------------|
+  | **MP4** (XAVC-S/HS) | `mdat détecté ✅` · `moov manquant ⚠️` | atome `moov` absent (cas nominal `.rsv`) |
+  | **MXF** (XAVC-I/L) | `Essence détectée ✅` · `Footer/Index Partition manquante ⚠️` | pas de `moov`/`mdat` — structure **KLV** (Header/Body/Footer Partitions, Index Table) |
+
+- **En V1**, un fichier **MXF** est **détecté et diagnostiqué** mais annoncé honnêtement « méthode de réparation à venir » (cf. `04` §3.4) — le composant n'affiche **jamais** de vocabulaire MP4 (moov/mdat) sur un MXF.
+- Champs communs (tous conteneurs) : codec présumé (`XAVC-S`…), durée estimée, taille, résolution/fps si détectés.
+- Ligne de **recommandation** : ex. « Fournir un fichier de référence **est nécessaire** » (cf. politique référence, `04` §3.5).
+- Mode avancé : dump structurel repliable — **atomes/boxes** pour MP4, **partitions/KLV** pour MXF.
 
 ### A3. Panneau « Options de récupération »
 - **`MediaScopeSelector`** — segmented control 3 options : **Son seul / Vidéo seule / Les deux**. Options indisponibles grisées + tooltip.
 - **`SliceSelector`** — segmented control 3 options : **1 min / 5 min / Intégrale**. Défaut = 1 min. Note pédagogique sous le contrôle.
-- **`ReferenceFileInput`** — même composant que A1, **affiché conditionnellement** (si méthode requiert une référence). Affiche un badge compatibilité `✓ compatible` / `✗ incompatible (codec différent)` après validation backend.
+- **`ReferenceFileInput`** — même composant que A1, **affiché conditionnellement**. **Chaînage explicite (MAJ-9)** : dès le diagnostic, le front appelle **`GET /api/methods/applicable?source={id}`** pour savoir si la méthode la plus probable requiert une référence — **y compris en mode Auto** (où la méthode concrète n'est résolue côté serveur qu'au lancement). C'est cette réponse (`requires_reference`) qui déclenche l'affichage, pas une supposition front.
+  - Badge compatibilité affiché comme **estimation** : **`≈ probablement compatible`** / `✗ incompatible (codec/conteneur différent)` (MAJ-6) — jamais un ✓ garanti (untrunc reste sensible à firmware/GOP/bitrate).
+  - Étant donné que sans référence rien n'est récupérable (`04` §3.5), le champ est présenté comme **requis** quand la méthode l'exige, avec aide à la recherche (même dossier/carte).
 - **`MethodSelector`** — dropdown/cartes : **Auto (recommandée)** par défaut ; en mode avancé, liste des méthodes pluggables applicables avec prérequis.
 
 ### A4. Barre d'action
@@ -68,14 +77,16 @@ Vues secondaires : **Modale « Méthodes alternatives »**, **Modale « Log tech
 ### B1. `VideoPlayer` (lecteur intégré)
 - Lecteur HTML5 standard (vidéo + audio), affiche la **tranche récupérée** courante.
 - **`SliceTabs`** intégrés au lecteur : onglets **1 min | 5 min | Intégrale**.
-  - Cliquer sur un onglet **charge la sortie correspondante SI elle existe déjà** ; sinon propose de **lancer** la récupération de cette tranche (réutilise le flux [4]→[6]).
-  - Visuellement : onglet plein = tranche disponible ; onglet estompé + icône = à générer.
+  - Une fois la **source réparée** (artefact en cache), **basculer d'un onglet à l'autre est quasi instantané** (~0,2 s) : chaque tranche est une simple extraction `-c copy` sur l'artefact, **sans re-réparation** (`03` §3.2). C'est le bénéfice concret du cache.
+  - Cliquer sur un onglet charge la tranche si déjà générée ; sinon l'extrait à la volée depuis l'artefact réparé (rapide). Ce n'est **que** si la source n'a jamais été réparée que le repair long se déclenche (une fois).
+  - Visuellement : onglet plein = tranche disponible ; onglet estompé + icône = à générer (extraction rapide).
 - Contrôles : play/pause, seek, volume, plein écran, piste audio (si son seul/les deux).
 - État « son seul » : le lecteur affiche une **waveform / placeholder audio** au lieu de l'image.
 - États : vide (aucune preview) / chargement / prêt / erreur de lecture.
 
 ### B2. `StatusPanel` (statut & progression)
-- **`ProgressBar`** + libellé d'étape lisible : `En file → Analyse → Reconstruction → Encodage tranche → Terminé`.
+- **`ProgressBar`** + libellé d'étape lisible : `En file → Analyse → Réparation (1×, peut durer plusieurs min sur gros rush) → Extraction de la tranche (copie, ~instantané) → Terminé`.
+  - Si l'artefact réparé est déjà en cache : l'étape « Réparation » est **sautée** (« Source déjà réparée — extraction… ») → tranche en ~0,2 s. Le composant doit distinguer visuellement **repair long** (barre qui avance lentement) vs **extraction instantanée**.
 - **`Elapsed/ ETA`** si disponible.
 - **`StepLog`** : timeline des étapes franchies (icônes ✓), avec bouton **« Voir le log technique »** → modale (mode avancé).
 - Bouton **`Cancel`** pendant l'exécution.
