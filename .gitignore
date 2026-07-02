@@ -1,0 +1,4 @@
+# Fichiers média déposés par l'utilisateur pour la récupération (bind mount
+# docker-compose ./media -> /media). Jamais commités.
+/media/*
+!/media/.gitkeep

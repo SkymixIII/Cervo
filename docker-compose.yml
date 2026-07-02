@@ -1,0 +1,54 @@
+# MediaNotFound — un seul `docker compose up` lance tout.
+# UI accessible sur http://localhost:${MNF_PORT:-8080} (seul port publié).
+#
+# Topologie : web (nginx) + app (backend + untrunc + ffmpeg embarqués) via
+# compose, plutôt qu'un mono-conteneur — deux images plus simples/standards à
+# construire et déboguer séparément, au prix de deux process au lieu d'un.
+# Compromis assumé explicitement (cf. arbitrage MAJ-15) : reste UNE commande,
+# UN port pour l'utilisateur, ce qui est l'exigence produit.
+#
+# Déposez vos fichiers (source abîmée + référence saine) dans ./media (ou tout
+# dossier pointé par MNF_MEDIA_DIR) : ils apparaissent dans le conteneur sous
+# /media, exactement le chemin attendu par le champ de saisie de l'UI.
+
+services:
+  app:
+    build:
+      context: ./backend
+    image: medianotfound-app:local
+    restart: unless-stopped
+    volumes:
+      - mnf_data:/data
+      - ${MNF_MEDIA_DIR:-./media}:/media
+    environment:
+      APP_WORKERS: "2"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Pas de "ports:" ici volontairement : l'app n'est joignable QUE via le
+    # service web (réseau interne compose), pour n'exposer qu'UN SEUL port
+    # côté hôte et éviter tout conflit avec un uvicorn de dev déjà lancé sur
+    # 8000 (cf. consigne : des serveurs dev tournent déjà sur 8000/5173).
+
+  web:
+    build:
+      context: ./frontend
+    image: medianotfound-web:local
+    restart: unless-stopped
+    ports:
+      - "${MNF_PORT:-8080}:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  mnf_data:
