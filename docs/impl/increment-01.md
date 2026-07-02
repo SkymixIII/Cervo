@@ -2,7 +2,23 @@
 
 > Auteur : **Builder**. Suite à `master-arbitration-02.md` (GO CONDITIONNEL).
 > Périmètre : **backend/moteur seul, pas de frontend.** Méthode V1 : `untrunc-moov`.
-> Statut : **INCRÉMENT 1 TERMINÉ** — prêt pour review CounterPower.
+> Statut : **INCRÉMENT 1 TERMINÉ + corrections post-review appliquées** (voir §6).
+
+---
+
+## Corrections post-review (`code-review-increment-01.md`) — round 2
+
+CounterPower a rendu un **GO CONDITIONNEL**. Les points bloquants/majeurs sont corrigés
+et re-testés (détail complet en **§6**). Résumé :
+
+| Réf review | Sujet | Correction | Preuve |
+|---|---|---|---|
+| **BLOQ-b-1** | Verrou `repair_locks` mort → deadlock permanent | (a) nettoyage au boot (`cache.reap_stale_locks` + `job_manager.reap_orphan_jobs` dans le lifespan) ; (b) vrai `job_id` propagé jusqu'au verrou ; (c) détection de staleness sans redémarrage (`_owner_alive` : si le job owner n'est plus `running`, l'attaché récupère le verrou) | **`tests/test_lock_recovery.py`** (A/B/C) ✅ |
+| **MAJ-code-1** | `owner_job_id` = `"?"` littéral | vrai `job_id` circulé de `run_recovery` → `get_or_repair` → `_try_acquire` | test A/B vérifie l'usage réel |
+| **MAJ-code-2** | `slice.py` : `.partial.mp4` déterministe sans verrou | tmp **unique par appel** (`uuid4`) + `os.replace` atomique + cleanup | code `slice.py` |
+| **MINEUR e2e** | chemin scratch codé en dur | `tempfile.mkdtemp(dir="/tmp")` (portable + partageable Docker) | e2e tourne hors machine Builder |
+
+**Résultat re-test** : `test_cancel` ✅ · `test_lock_recovery` **A/B/C ✅** · `tests/e2e.py` **19/19 ✅ (exit 0)**.
 
 ---
 
@@ -192,4 +208,62 @@ test_cancel : annulation en 0.57s, enfant pid bien tué ✅
 
 ---
 
-**INCRÉMENT 1 TERMINÉ.** En attente de review CounterPower avant le frontend.
+## 6. Corrections post-review — détail technique
+
+### 6.1 BLOQ-b-1 — récupération d'un verrou `repair_locks` mort
+Trois mécanismes complémentaires, tous testés (`tests/test_lock_recovery.py`) :
+- **Nettoyage au boot** (`main.py::lifespan`) : `cache.reap_stale_locks` passe tout
+  verrou resté `in_progress` → `failed`, et `job_manager.reap_orphan_jobs` marque
+  `failed` les jobs restés `queued`/`running`. Au démarrage, aucun worker n'a survécu
+  (le `ProcessPoolExecutor` vit dans le conteneur `app`) → ces lignes sont
+  nécessairement orphelines. Couvre le cas « crash + redémarrage du conteneur ».
+- **Staleness sans redémarrage** (`cache.get_or_repair`, boucle d'attache) : un
+  attaché vérifie `_owner_alive(owner_job_id)` — si le job owner n'est plus
+  `running`/`queued` (ex. OOM-kill → le done-callback du pool l'a marqué `failed`),
+  le verrou est neutralisé et l'attaché **récupère** au lieu de boucler à l'infini.
+  Couvre l'OOM-kill **sans** redémarrage.
+- **Vrai `job_id`** (corrige MAJ-code-1) : propagé `run_recovery(job_id=…)` →
+  `get_or_repair(owner_job_id=…)` → `_try_acquire` (fini la chaîne littérale `"?"`),
+  ce qui rend possible la vérif de liveness ci-dessus.
+
+Test de régression `tests/test_lock_recovery.py` (3 scénarios, garde anti-deadlock
+par `thread.join(timeout)`) :
+- **A** verrou orphelin nettoyé au boot → repair reprend ;
+- **B** owner mort sans redémarrage (job `failed`) → attaché récupère, **pas de deadlock** ;
+- **C** concurrence saine → **exactement 1 repair réel**, l'autre attaché (régression inverse).
+
+### 6.2 MAJ-code-2 — cache de tranche sans verrou
+`slice.py::extract_slice` écrit désormais dans un tmp **unique par appel**
+(`.{slice}.{uuid4}.partial.mp4`) puis `os.replace` atomique vers `dst`, avec cleanup
+du tmp en `finally`. Deux extractions concurrentes de la même tranche produisent
+chacune un fichier complet ; le « perdant » ne peut plus corrompre celui de l'autre.
+
+### 6.3 e2e portable (mineur)
+`tests/e2e.py` : scratch via `tempfile.mkdtemp(dir="/tmp")` (résolu → `/private/tmp`).
+**Piège Docker macOS documenté pour DockerManager** (voir 6.4) : le TMPDIR par défaut
+(`/var/folders/...`) n'est **pas partagé** par Docker Desktop.
+
+### 6.4 Note DockerManager — échec silencieux de montage (garde-fou ajouté)
+`scripts/untrunc-docker.sh` monte les racines à l'identique. Si Docker **ne partage
+pas** le chemin hôte (ex. `/var/folders` macOS, ou tout dossier hors File Sharing),
+le bind-mount monte un dossier **vide** et untrunc échoue par un obscur
+`No such file or directory` — piège rencontré pendant les corrections. Le wrapper
+**détecte** maintenant ce cas (racine média montée mais vide dans le conteneur) et
+renvoie un **message d'erreur clair** (`exit 3`) au lieu de l'échec cryptique.
+➡️ **DockerManager** : quand untrunc sera embarqué dans l'image `app`, ce garde-fou
+n'aura plus lieu d'être, mais le **principe** (échouer clairement si les médias ne sont
+pas accessibles au process) doit être préservé, et la doc de déploiement doit
+rappeler la contrainte de partage des volumes.
+
+### 6.5 Sur le `HTTP Error 409` vu dans un log e2e — PAS une régression
+Le 409 provenait de `GET /api/jobs/{id}/preview` qui renvoie **409 tant que le job
+n'est pas `succeeded`** (comportement voulu, `jobs.py`). Il n'apparaissait que parce
+que `job1` échouait (problème de montage untrunc ci-dessus) et que l'e2e télécharge
+la preview en `urlopen` brut (qui lève sur non-200). Une fois le montage corrigé,
+`job1` réussit → preview `200`, plus aucun 409. Aucun lien avec la nouvelle logique
+de verrou/idempotence.
+
+---
+
+**CORRECTIONS INCRÉMENT 1 TERMINÉES.** `test_cancel` + `test_lock_recovery` +
+`tests/e2e.py` **tous verts**. Frontend non démarré (hors périmètre de ce tour).

@@ -6,6 +6,8 @@ périmètre média (audio/vidéo/both) est appliqué par `-map`, toujours en cop
 """
 from __future__ import annotations
 
+import os
+import uuid
 from pathlib import Path
 from typing import Callable
 
@@ -57,9 +59,16 @@ def extract_slice(
     # Cache de tranche (2e niveau, 03 §3.3) : déjà extraite → resservie.
     if dst.exists():
         return dst
-    tmp = dst.with_suffix(".partial.mp4")
+    # MAJ-code-2 : nom temporaire UNIQUE par appel (uuid4), pas un `.partial.mp4`
+    # déterministe. Deux extractions concurrentes de la MÊME tranche écrivent chacune
+    # dans leur propre tmp puis `os.replace` (atomique) vers `dst` : le « perdant »
+    # ne peut plus corrompre le fichier de l'autre (les deux tmp sont complets).
+    tmp = dst.parent / f".{slice_kind}.{uuid.uuid4().hex}.partial.mp4"
     argv = build_slice_argv(ffmpeg_bin, artifact, str(tmp), scope, slice_kind)
-    run_tool(argv, is_canceled=is_canceled, on_child_pid=on_child_pid)
-    import os
-    os.replace(str(tmp), str(dst))  # même dossier → atomique
+    try:
+        run_tool(argv, is_canceled=is_canceled, on_child_pid=on_child_pid)
+        os.replace(str(tmp), str(dst))  # même dossier → atomique
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
     return dst

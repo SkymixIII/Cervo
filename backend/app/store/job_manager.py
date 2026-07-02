@@ -28,6 +28,25 @@ def _now() -> str:
 
 # ---- Création / lecture -----------------------------------------------------
 
+def reap_orphan_jobs(db_path: str) -> int:
+    """Nettoyage au démarrage (BLOQ-b-1) : marque `failed` les jobs restés
+    `queued`/`running` après un redémarrage dur (leur worker n'a pas survécu au
+    ProcessPool). Retourne le nombre de jobs nettoyés. Va de pair avec
+    `cache.reap_stale_locks`.
+    """
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE jobs SET status='failed', step='orphaned', error_code='JOB_FAILED', "
+            "error_message='Job interrompu par un redémarrage de l''application.', "
+            "child_pid=NULL, finished_at=? WHERE status IN ('queued','running')",
+            (_now(),),
+        )
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
 def create_job(cfg: Config, *, source_id: str, method_id: str, media_scope: str,
                slice_kind: str, reference_id: str | None, parent_job_id: str | None = None) -> dict:
     jid = "job_" + uuid.uuid4().hex[:12]
@@ -150,6 +169,7 @@ def run_job_worker(job_id: str, cfg_dict: dict) -> None:
         result = pl.run_recovery(
             cfg=cfg,
             db_path=db_path,
+            job_id=job_id,
             method_id=job["method_id"],
             source_path=source["path"],
             source_hash=source["cache_hash"],
