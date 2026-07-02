@@ -13,6 +13,8 @@ from fastapi import FastAPI
 from .config import Config
 from .db import init_db
 from .methods import base as methods
+from .pipeline import cache
+from .store import job_manager
 from .api import media, references, methods as methods_api, jobs
 
 
@@ -22,6 +24,12 @@ async def lifespan(app: FastAPI):
     cfg.ensure_dirs()
     init_db(cfg.db_path)
     methods.load_builtin_methods()
+    # BLOQ-b-1a : au boot, aucun worker n'a survécu → on nettoie les verrous de
+    # repair et les jobs restés « en cours » (sinon deadlock permanent du verrou).
+    reaped_locks = cache.reap_stale_locks(cfg.db_path)
+    reaped_jobs = job_manager.reap_orphan_jobs(cfg.db_path)
+    if reaped_locks or reaped_jobs:
+        print(f"[boot] nettoyage orphelins: {reaped_locks} verrou(x), {reaped_jobs} job(s)")
     pool = ProcessPoolExecutor(max_workers=cfg.workers)
     app.state.cfg = cfg
     app.state.pool = pool

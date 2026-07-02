@@ -15,4 +15,23 @@ mounts=()
 [ -n "${APP_MEDIA_ROOT:-}" ] && mounts+=(-v "$APP_MEDIA_ROOT:$APP_MEDIA_ROOT")
 [ -n "${APP_WORK_ROOT:-}" ]  && mounts+=(-v "$APP_WORK_ROOT:$APP_WORK_ROOT")
 
-exec docker run --rm --user "$(id -u):$(id -g)" "${mounts[@]}" untrunc "$@"
+# ⚠️ Garde-fou "montage partagé" (post-review) : si Docker ne partage PAS le chemin
+# hôte (ex. /var/folders sur macOS, ou un dossier hors File Sharing de Docker
+# Desktop), le bind-mount monte un dossier VIDE et untrunc échoue par un obscur
+# « No such file or directory ». On détecte ça (racine média visible mais vide) et on
+# renvoie un message clair (exit 3) AVANT de lancer untrunc. `$APP_MEDIA_ROOT`
+# contient toujours au moins la source + la référence au moment de l'appel.
+guard="${APP_MEDIA_ROOT:-}"
+
+exec docker run --rm --user "$(id -u):$(id -g)" "${mounts[@]}" \
+  --entrypoint /bin/sh untrunc -c '
+    d="$1"; shift
+    if [ -n "$d" ] && [ -z "$(ls -A "$d" 2>/dev/null)" ]; then
+      echo "untrunc-docker: le chemin monte \"$d\" est INVISIBLE/VIDE dans le conteneur." >&2
+      echo "  -> Docker ne partage probablement pas ce chemin. Placez les medias sous" >&2
+      echo "     un chemin partage par Docker (ex. /private/tmp, \$HOME) ou ajoutez-le" >&2
+      echo "     au File Sharing de Docker Desktop." >&2
+      exit 3
+    fi
+    exec /bin/untrunc "$@"
+  ' _ "$guard" "$@"

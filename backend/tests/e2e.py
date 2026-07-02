@@ -85,9 +85,17 @@ def _ffprobe_ok(ffprobe: str, path: str) -> bool:
 
 
 def main() -> int:
-    scratch = Path(os.environ.get("E2E_SCRATCH",
-                   "/private/tmp/claude-501/-Users-lois--claude-squad-worktrees-lois-builder-18be692d521fc650"
-                   "/f9245548-ebb5-4ce9-8f7c-ee8f04f16bcd/scratchpad/e2e"))
+    import tempfile
+    # Dossier de travail portable (CI/DockerManager/autre machine) : plus de chemin
+    # de session Builder codé en dur. Surchargeable via E2E_SCRATCH.
+    # ⚠️ On force le scratch sous /private/tmp (et non le TMPDIR macOS /var/folders/...
+    # que Docker Desktop NE PARTAGE PAS par défaut) : sinon untrunc, dans le conteneur,
+    # ne voit pas les fichiers montés → « No such file or directory ». `.resolve()`
+    # lève le symlink /tmp → /private/tmp pour un montage sans ambiguïté.
+    if os.environ.get("E2E_SCRATCH"):
+        scratch = Path(os.environ["E2E_SCRATCH"])
+    else:
+        scratch = Path(tempfile.mkdtemp(prefix="mnf_e2e_", dir="/tmp")).resolve()
     media_root = scratch / "media"
     work_root = scratch / "work"
     db_path = scratch / "app.db"

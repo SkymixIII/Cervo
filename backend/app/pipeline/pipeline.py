@@ -28,6 +28,7 @@ def run_recovery(
     *,
     cfg,
     db_path: str,
+    job_id: str,
     method_id: str,
     source_path: str,
     source_hash: str,
@@ -85,6 +86,7 @@ def run_recovery(
         reference_hash=reference_hash,
         do_repair=do_repair,
         is_canceled=is_canceled,
+        owner_job_id=job_id,
         on_wait=lambda: on_step("repair-attached", 50.0),
     )
     on_step("repair", 100.0)
