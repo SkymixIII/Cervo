@@ -28,6 +28,13 @@ export function DiagnosticCard({ d }: { d: Diagnostic }) {
         </div>
       )}
 
+      {d.container === "sony-rsv" && (
+        <div className="badges">
+          <Badge ok>Essence XAVC-I détectée ✅</Badge>
+          <Badge warn>Fichier Sony non finalisé (.rsv) ⚠️</Badge>
+        </div>
+      )}
+
       {d.container === "mxf" && (
         <div className="badges">
           <Badge ok warn={false}>Essence détectée ✅</Badge>
@@ -35,7 +42,7 @@ export function DiagnosticCard({ d }: { d: Diagnostic }) {
         </div>
       )}
 
-      {d.container !== "mp4" && d.container !== "mxf" && (
+      {d.container !== "mp4" && d.container !== "mxf" && d.container !== "sony-rsv" && (
         <div className="badges">
           <Badge warn>Format non reconnu</Badge>
         </div>
@@ -64,6 +71,13 @@ export function DiagnosticCard({ d }: { d: Diagnostic }) {
           </div>
         )}
       </dl>
+
+      {d.container === "sony-rsv" && (
+        <p className="note">
+          Fichier <b>Sony .rsv</b> (enregistrement XAVC-I interrompu) — récupérable par
+          reconstruction de l'essence via une <b>référence saine</b> de la même caméra.
+        </p>
+      )}
 
       {d.container === "mxf" && (
         <p className="note note-warn">

@@ -20,7 +20,7 @@ export interface Track {
 }
 
 export interface Diagnostic {
-  container: string; // 'mp4' | 'mxf' | 'unknown'
+  container: string; // 'mp4' | 'sony-rsv' | 'mxf' | 'unknown'
   atoms: { ftyp: boolean; mdat: boolean; moov: boolean };
   brand: string | null;
   codec: { family: string; video: string | null; audio: string | null };

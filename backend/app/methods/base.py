@@ -90,5 +90,6 @@ def resolve_method_id(method_id: str, diagnostic: dict, options: dict | None = N
 
 def load_builtin_methods() -> None:
     """Enregistre les plugins de la V1. Import différé = point d'extension simple."""
-    from . import untrunc_moov  # noqa: F401  (s'auto-enregistre à l'import)
-    from . import ffmpeg_remux  # noqa: F401
+    from . import untrunc_moov      # noqa: F401  (s'auto-enregistre à l'import)
+    from . import ffmpeg_remux      # noqa: F401
+    from . import sony_rsv_rebuild  # noqa: F401  (Sony .rsv / XAVC-I — Spike 02)
