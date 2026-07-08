@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.methods.sony_rsv_rebuild import (  # noqa: E402
-    SONY_KLV_KEY, _dechunk, _walk_frame, AVCC_AUD,
+    SONY_KLV_KEY, _dechunk, _walk_frame, _find_next_frame_start, AVCC_AUD,
 )
 
 
@@ -72,7 +72,30 @@ def test_walk_frame_drops_last_partial() -> None:
         assert any(t in (1, 5) for t, _ in nals), "chaque frame doit porter des slices"
 
 
+def test_frame_before_audio_not_dropped() -> None:
+    # frame vidéo suivie d'un chunk AUDIO (record non-NAL) : la frame doit être
+    # rendue avec status 'audio' (régression : elle était droppée en Incrément 4).
+    audio = b"\xff\xff\xed\x00\x00\x3b" * 2000            # PCM-like (u32 tête = grande valeur)
+    ess = bytearray(_frame() + audio + _frame())
+    nals, nextpos, status = _walk_frame(ess, 0, ended=False)
+    assert status == "audio", f"attendu 'audio', obtenu {status}"
+    assert any(t in (1, 5) for t, _ in nals), "la frame avant l'audio doit être conservée"
+    # nextpos pointe le début de l'audio ; le prochain vrai AUD est APRÈS l'audio.
+    real = _find_next_frame_start(ess, nextpos, ended=True)
+    assert real == len(_frame()) + len(audio), "l'audio doit être délimité par l'AUD vidéo suivant"
+
+
+def test_find_next_frame_start_skips_false_aud_in_pcm() -> None:
+    # un faux AUD (00 00 00 02 09) dans du PCM ne doit pas être pris pour une frame.
+    false_aud = b"\x00\x00\x00\x02\x09" + b"\x00" * 40    # pas de NAL SEI/slice derrière
+    ess = bytearray(false_aud + _frame())
+    pos = _find_next_frame_start(ess, 0, ended=True)
+    assert pos == len(false_aud), "le faux AUD dans le PCM doit être ignoré"
+
+
 if __name__ == "__main__":
     test_dechunk_strips_sony_clusters()
     test_walk_frame_drops_last_partial()
-    print("[PASS] framing Sony .rsv : de-chunk + drop dernière frame partielle")
+    test_frame_before_audio_not_dropped()
+    test_find_next_frame_start_skips_false_aud_in_pcm()
+    print("[PASS] framing Sony .rsv : de-chunk + drop frame partielle + audio (délim + anti-drop)")

@@ -3,22 +3,25 @@
 Validé par le **Spike 02** (docs/spike/spike-02-mxf.md + docs/spike/poc-rsv/) :
 le `.rsv` du PXW-Z200 n'est **ni MP4 ni MXF** — c'est un conteneur de récupération
 **propriétaire Sony** (blocs KLV privés à pas 11264 o) contenant l'essence
-**XAVC-I (H.264 All-Intra 4:2:2 10-bit)** + PCM, écrite AVANT finalisation. Aucun
-outil sur étagère ne le lit (ffmpeg/bmx le rejettent).
+**XAVC-I (H.264 All-Intra 4:2:2 10-bit)** + **PCM 24-bit**, écrite AVANT finalisation.
+Aucun outil sur étagère ne le lit (ffmpeg/bmx le rejettent).
 
-Cette méthode **porte le PoC** en production :
-  1. **de-chunk** du framing Sony (retire les clusters KLV, reconstitue l'essence) ;
-  2. **carve** des access units H.264 (AUD + SEI + slices, framés en avcC 4 octets) ;
-  3. **SPS/PPS** pris dans la **référence** saine (byte-identiques — Spike 02 §9.1) ;
-  4. **mux** en MP4 lisible (fps/timescale de la référence).
+Structure décodée (Spike 02 + Incrément 4/audio) :
+- **Vidéo** : NAL H.264 framés **avcC** `[u32 len][NAL]` — access units `AUD+SEI+slices`.
+  SPS/PPS pris dans la **référence** (byte-identiques). Frontière de frame = AUD.
+- **Audio** : chunks **PCM s24be 4 canaux entrelacés** insérés entre les GOP vidéo,
+  sans en-tête de longueur → délimités par l'AUD vidéo suivant (validé).
 
-⚠️ **Streaming, mémoire bornée** : le fichier va jusqu'à ~70 Go. On lit par blocs,
-on ne charge JAMAIS tout en RAM, et on **pipe** l'Annex-B directement dans le
-`stdin` de ffmpeg (pas de gros fichier intermédiaire). La **dernière frame
-partielle** (bord de la troncature) n'est jamais émise (drop).
+Reconstruction (streaming, mémoire bornée — le fichier va jusqu'à ~70 Go) :
+  1. **de-chunk** du framing Sony (retire les clusters KLV) ;
+  2. **carve** vidéo (frames) + **collecte** audio (chunks) en UN SEUL passage ;
+  3. écrit un **Annex-B vidéo** (SPS/PPS de la référence + slices) et un **PCM audio**
+     dans des fichiers temporaires (jamais tout en RAM) ;
+  4. **mux** ffmpeg → MP4 (vidéo + audio) avec fps/timescale de la référence.
 
-TODO(audio) : désentrelacement des **4 canaux PCM s24be** + mux piste son. Cet
-incrément livre la **vidéo** de bout en bout ; l'audio est un incrément suivant.
+L'artefact réparé contient **toujours vidéo + audio** ; le périmètre média
+(`audio`/`video`/`both`) est appliqué en aval par le slice `-c copy` (`-map`).
+La **dernière frame partielle** (bord de la troncature) n'est jamais émise.
 """
 from __future__ import annotations
 
@@ -38,9 +41,19 @@ SONY_KLV_KEY = bytes.fromhex("060e2b34025301010c0201")   # clé KLV privée Sony
 AVCC_AUD = b"\x00\x00\x00\x02\x09"                        # AUD framé avcC (marqueur de frame)
 START = b"\x00\x00\x00\x01"                               # start code Annex-B
 VCL_TYPES = {1, 5, 6, 9, 12}                              # NAL types attendus dans l'essence
+NAL_AFTER_AUD = {1, 5, 6}                                 # 1er NAL après AUD dans une vraie frame
 MAX_NAL = 8 << 20                                         # garde-fou taille NAL
 READ_CHUNK = 4 << 20                                      # lecture source par blocs
-TRIM_AT = 16 << 20                                        # compaction du buffer essence
+TRIM_AT = 32 << 20                                        # compaction du buffer essence
+
+# Audio : 4 canaux PCM s24be entrelacés (échantillon-frame = 4 × 3 octets).
+# Format FIXE du conteneur Sony (Spike 02, confirmé par la référence). Les chunks
+# audio sont insérés entre les GOP puis complétés par du PADDING (zéros) avant l'AUD
+# suivant → on ne garde QUE le PCM réel, en verrouillant sa longueur sur l'horloge
+# vidéo (frames × échantillons/frame) : sync A/V garantie, padding jeté.
+AUDIO_RATE = 48000
+AUDIO_CH = 4
+AUDIO_BYTES_PER_SF = AUDIO_CH * 3
 
 
 def _ber_len(buf: bytes, off: int):
@@ -65,20 +78,19 @@ class SonyRsvRebuild:
         return {
             "containers": ["sony-rsv"],
             "codecs": ["h264", "xavc-i"],
-            "tracks": ["video"],          # audio PCM = incrément suivant (TODO)
+            "tracks": ["video", "audio"],     # audio PCM 4 canaux (Incrément 4/audio)
         }
 
     def can_handle(self, diagnostic: dict, options: dict) -> Applicability:
         if diagnostic.get("container") != "sony-rsv":
             return Applicability(False, 0.0, "Conteneur non `.rsv` Sony (méthode dédiée XAVC-I).")
-        # Détecté comme .rsv Sony + essence présente : cas nominal validé (Spike 02).
         return Applicability(
             True, 0.9,
-            "Fichier de récupération Sony `.rsv` (XAVC-I / H.264 All-Intra) — référence requise "
-            "pour les paramètres SPS/PPS (byte-identiques, Spike 02).",
+            "Fichier de récupération Sony `.rsv` (XAVC-I / H.264 All-Intra + PCM) — référence "
+            "requise pour les paramètres SPS/PPS (byte-identiques, Spike 02).",
         )
 
-    # -- repair : de-chunk streaming -> carve -> pipe Annex-B dans ffmpeg -----
+    # -- repair : de-chunk streaming -> carve vidéo + collecte audio -> mux --
     def repair(self, ctx: RepairContext) -> Path:
         if not ctx.reference_path:
             raise ValueError("sony-rsv-rebuild requiert un fichier de référence.")
@@ -89,59 +101,86 @@ class SonyRsvRebuild:
         sps, pps, fps = _reference_params(ffmpeg, ffprobe, ctx.reference_path, ctx.tmp_dir)
         if not sps or not pps:
             raise RuntimeError("Impossible d'extraire SPS/PPS de la référence (H.264 attendu).")
+        # Octets audio par frame vidéo = (rate / fps) × canaux × 3, verrou de sync A/V.
+        num, den = (int(x) for x in fps.split("/"))
+        samples_per_frame = round(AUDIO_RATE * den / num) if num else 1920
+        frame_audio_bytes = samples_per_frame * AUDIO_BYTES_PER_SF
 
+        video_h264 = ctx.tmp_dir / "video.h264"
+        audio_pcm = ctx.tmp_dir / "audio.pcm"
         out_path = ctx.tmp_dir / "repaired.mp4"
-        log = open(ctx.tmp_dir / "ffmpeg.log", "wb")
-        # ffmpeg lit l'Annex-B depuis stdin, mux en MP4 (fps/timescale de la référence).
+
+        # 1) passage streaming unique : sépare vidéo (Annex-B) et audio (PCM brut).
+        frames, audio_bytes = self._stream_carve(ctx, sps, pps, video_h264, audio_pcm,
+                                                 frame_audio_bytes)
+        if frames == 0:
+            raise RuntimeError("Aucune frame reconstruite depuis le `.rsv` (framing inattendu ?).")
+
+        # 2) mux ffmpeg : vidéo + audio (si présent).
         argv = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-            "-fflags", "+genpts", "-r", fps, "-f", "h264", "-i", "pipe:0",
-            "-c:v", "copy", "-video_track_timescale", "25000",
-            "-movflags", "+faststart", str(out_path),
+            "-fflags", "+genpts", "-r", fps, "-f", "h264", "-i", str(video_h264),
         ]
-        proc = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=log, stderr=log,
-            start_new_session=True,
-        )
-        ctx.on_child_pid(proc.pid)
+        has_audio = audio_bytes >= AUDIO_BYTES_PER_SF
+        if has_audio:
+            argv += ["-f", "s24be", "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-i", str(audio_pcm),
+                     "-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            argv += ["-map", "0:v:0"]
+        argv += ["-c", "copy", "-video_track_timescale", "25000",
+                 "-movflags", "+faststart", str(out_path)]
 
-        total = max(1, os.path.getsize(ctx.source_path))
-        frames = 0
-        try:
-            frames = self._stream_carve(
-                ctx, proc, sps, pps, total,
-            )
-            proc.stdin.close()
-            rc = proc.wait()
-            if rc != 0:
-                tail = _tail(ctx.tmp_dir / "ffmpeg.log")
-                raise ToolFailed(argv, rc, tail)
-        except Canceled:
-            _kill(proc)
-            raise
-        finally:
-            ctx.on_child_pid(None)
-            log.close()
-            if proc.poll() is None:
-                _kill(proc)
+        ctx.on_progress(92.0)
+        _run_subprocess(argv, ctx, ctx.tmp_dir / "ffmpeg.log")
 
-        if frames == 0 or not out_path.exists() or out_path.stat().st_size == 0:
-            raise RuntimeError("Aucune frame reconstruite depuis le `.rsv` (framing inattendu ?).")
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            raise RuntimeError("Le mux ffmpeg n'a produit aucun MP4.")
+        # temporaires volumineux : libérer tout de suite (l'artefact est publié à part).
+        video_h264.unlink(missing_ok=True)
+        audio_pcm.unlink(missing_ok=True)
         ctx.on_progress(100.0)
         return out_path
 
-    def _stream_carve(self, ctx: RepairContext, proc, sps, pps, total) -> int:
-        """Lit la source par blocs, de-chunke, carve les frames, pipe l'Annex-B.
-        Retourne le nombre de frames émises. La dernière frame partielle est droppée.
+    def _stream_carve(self, ctx: RepairContext, sps, pps, video_h264: Path, audio_pcm: Path,
+                      frame_audio_bytes: int):
+        """Lit la source par blocs, de-chunke, sépare vidéo/audio. UN passage.
+
+        Retourne (nb_frames, nb_octets_audio). La dernière frame partielle est droppée.
+        Corrige aussi le drop de la frame qui précède chaque chunk audio (Incrément 4) :
+        une frame terminée par de l'audio (record non-NAL) est bien émise.
+
+        **Sync audio** : chaque chunk audio est tronqué à `frames_depuis_dernier_chunk ×
+        frame_audio_bytes` (le PCM réel est en tête, le padding en queue) → la durée
+        audio suit exactement l'horloge vidéo.
         """
-        ess = bytearray()      # essence de-chunkée en attente de parsing
-        cursor = 0             # index de la prochaine frame à chercher
-        carry = b""            # octets bruts non résolus (de-chunk)
+        ess = bytearray()
+        cursor = 0
+        pending_audio = -1          # offset de début d'un chunk audio en attente de fin, ou -1
+        carry = b""
         read_bytes = 0
         frames = 0
+        frames_since_audio = 0      # frames émises depuis le dernier chunk audio (verrou sync)
+        audio_bytes = 0
         header_written = False
 
-        def write(nals, first: bool):
+        def flush_audio(chunk: bytes) -> int:
+            nonlocal frames_since_audio
+            want = frames_since_audio * frame_audio_bytes
+            take = min(want, len(chunk) - (len(chunk) % AUDIO_BYTES_PER_SF))
+            if take > 0:
+                fa.write(chunk[:take])
+            # complète en silence si le PCM réel manque (garde la sync stricte)
+            if take < want:
+                fa.write(b"\x00" * (want - take))
+                take = want
+            frames_since_audio = 0
+            return take
+
+        total = max(1, os.path.getsize(ctx.source_path))
+        fv = open(video_h264, "wb")
+        fa = open(audio_pcm, "wb")
+
+        def emit_video(nals, first):
             buf = bytearray()
             for n in [n for t, n in nals if t == 9][:1]:   # AUD (un seul)
                 buf += START + n
@@ -151,86 +190,102 @@ class SonyRsvRebuild:
             for t, n in nals:                               # SEI + slices
                 if t in (6, 5, 1):
                     buf += START + n
-            try:
-                proc.stdin.write(buf)
-            except BrokenPipeError:
-                raise ToolFailed(["ffmpeg"], proc.poll() or -1, _tail(ctx.tmp_dir / "ffmpeg.log"))
+            fv.write(buf)
 
-        with open(ctx.source_path, "rb") as f:
-            while True:
-                if ctx.is_canceled():
-                    raise Canceled()
-                data = f.read(READ_CHUNK)
-                ended = not data
-                read_bytes += len(data)
-                essence, carry = _dechunk(carry + data, ended)
-                ess += essence
-
-                # Extraire toutes les frames complètes disponibles.
+        try:
+            with open(ctx.source_path, "rb") as f:
                 while True:
-                    a = ess.find(AVCC_AUD, cursor)
-                    if a < 0:
-                        cursor = max(cursor, len(ess) - 4)  # garder un chevauchement
-                        break
-                    nals, nextpos, status = _walk_frame(ess, a, ended)
-                    if status == "need_more":
-                        cursor = a
-                        break
-                    if status == "bad":
-                        cursor = a + 5
+                    if ctx.is_canceled():
+                        raise Canceled()
+                    data = f.read(READ_CHUNK)
+                    ended = not data
+                    read_bytes += len(data)
+                    essence, carry = _dechunk(carry + data, ended)
+                    ess += essence
+
+                    while True:
+                        # (a) on cherche la fin d'un chunk audio commencé.
+                        if pending_audio >= 0:
+                            end = _find_next_frame_start(ess, max(pending_audio, cursor), ended)
+                            if end == -2:            # need more data
+                                break
+                            if end == -1:            # plus aucune frame : audio de queue
+                                audio_bytes += flush_audio(ess[pending_audio:])
+                                pending_audio = -1
+                                cursor = len(ess)
+                                break
+                            audio_bytes += flush_audio(ess[pending_audio:end])
+                            pending_audio = -1
+                            cursor = end
+                            continue
+
+                        # (b) frame vidéo suivante.
+                        a = ess.find(AVCC_AUD, cursor)
+                        if a < 0:
+                            cursor = max(cursor, len(ess) - 4)
+                            break
+                        nals, nextpos, status = _walk_frame(ess, a, ended)
+                        if status == "need_more":
+                            cursor = a
+                            break
+                        if status == "bad":
+                            cursor = a + 5
+                            continue
+                        # frame complète (terminée par AUD ou par audio) → émise.
+                        emit_video(nals, first=not header_written)
+                        header_written = True
+                        frames += 1
+                        frames_since_audio += 1
+                        if status == "audio":
+                            pending_audio = nextpos    # le chunk audio démarre ici
+                        else:
+                            cursor = nextpos           # AUD suivant
                         continue
-                    # complete : frame pleine, nextpos = début de l'AUD suivant
-                    write(nals, first=not header_written)
-                    header_written = True
-                    frames += 1
-                    cursor = nextpos
 
-                # Compaction du buffer pour rester borné en mémoire.
-                if cursor > TRIM_AT:
-                    del ess[:cursor]
-                    cursor = 0
+                    # compaction du buffer (seulement quand pas au milieu d'un chunk audio).
+                    if pending_audio < 0 and cursor > TRIM_AT:
+                        del ess[:cursor]
+                        cursor = 0
 
-                ctx.on_progress(min(99.0, read_bytes / total * 100.0))
-                if ended:
-                    break
-        # NB : une frame commencée mais non suivie d'un AUD (troncature) reste dans
-        # `ess` et n'est JAMAIS écrite → dernière frame partielle droppée.
-        return frames
+                    ctx.on_progress(min(90.0, read_bytes / total * 90.0))
+                    if ended:
+                        break
+        finally:
+            fv.close()
+            fa.close()
+        return frames, audio_bytes
 
 
 def _dechunk(buf: bytes, ended: bool):
     """Retire les clusters KLV Sony ; retourne (essence, carry_non_résolu).
 
-    Sans état : à chaque position, si les 11 octets == clé Sony → paquet KLV (on
-    le saute via sa longueur BER) ; sinon → essence jusqu'à la prochaine clé Sony.
-    On garde en `carry` toute clé/paquet incomplet en fin de buffer.
+    Sans état : si les 11 octets == clé Sony → paquet KLV (sauté via sa longueur BER) ;
+    sinon → essence jusqu'à la prochaine clé Sony. Tout paquet/clé incomplet en fin de
+    buffer est renvoyé en `carry`.
     """
     out = bytearray()
     i = 0
     n = len(buf)
     while i < n:
         if buf[i:i + 11] == SONY_KLV_KEY:
-            # paquet KLV : clé(16) + BER + valeur — on le saute entièrement.
             if i + 16 > n:
-                break  # clé partielle → carry
+                break
             ln, hl = _ber_len(buf, i + 16)
             if ln is None:
-                break  # longueur BER incomplète → carry
+                break
             end = i + 16 + hl + ln
             if end > n:
                 if ended:
-                    i = n     # paquet tronqué en fin de fichier : on l'abandonne
-                break         # valeur incomplète → carry
+                    i = n
+                break
             i = end
             continue
-        # essence : émettre jusqu'à la prochaine clé Sony.
         j = buf.find(SONY_KLV_KEY, i)
         if j < 0:
             if ended:
                 out += buf[i:]
                 i = n
             else:
-                # garder les 15 derniers octets (clé Sony potentiellement à cheval)
                 keep = max(i, n - 15)
                 out += buf[i:keep]
                 i = keep
@@ -243,14 +298,12 @@ def _dechunk(buf: bytes, ended: bool):
 def _walk_frame(ess: bytearray, a: int, ended: bool):
     """Parse un access unit avcC (`[u32 len][NAL]`) à partir d'un AUD en `a`.
 
-    Retourne (nals, nextpos, status) avec status ∈ {complete, need_more, bad}.
-    - complete : frame pleine **terminée par l'AUD suivant** (`nextpos` = son offset).
-      C'est le SEUL terminateur fiable → garantit qu'on n'émet que des frames entières.
-    - need_more : buffer insuffisant pour décider (lire plus) — sauf si `ended`.
-    - bad : faux AUD, ou frame non terminée (dernière frame tronquée) → **droppée**.
-
-    Conséquence voulue (drop de la dernière frame partielle) : une frame commencée
-    mais dont l'AUD suivant n'apparaît pas avant EOF n'est **jamais** émise.
+    Retourne (nals, nextpos, status) avec status ∈ {complete, audio, need_more, bad} :
+    - complete : frame terminée par l'**AUD suivant** (`nextpos` = son offset) ;
+    - audio    : frame terminée par un **record non-NAL** (= début d'un chunk audio),
+                 `nextpos` = offset de l'audio → la frame est émise (pas de drop) ;
+    - need_more : buffer insuffisant (lire plus), sauf si `ended` ;
+    - bad      : faux AUD / frame non terminée → droppée (drop dernière frame partielle).
     """
     pos = a
     nals: list[tuple[int, bytes]] = []
@@ -259,27 +312,61 @@ def _walk_frame(ess: bytearray, a: int, ended: bool):
         if pos + 4 > N:
             return (None, pos, "bad" if ended else "need_more")
         L = struct.unpack(">I", ess[pos:pos + 4])[0]
-        if not (1 <= L <= MAX_NAL):
-            return (None, pos, "bad")            # pas un record avcC valide
-        t = ess[pos + 4] & 0x1f
-        if (ess[pos + 4] & 0x80) != 0:
-            return (None, pos, "bad")            # forbidden_zero_bit → faux AUD
+        b0 = ess[pos + 4] if pos + 4 < N else 0
+        is_nal = (1 <= L <= MAX_NAL) and (b0 & 0x80) == 0 and (b0 & 0x1f) in VCL_TYPES
+        if not is_nal:
+            # record non-vidéo → audio (ou junk) : la frame courante se termine ici.
+            return (nals, pos, "audio") if _has_slice(nals) else (None, pos, "bad")
+        t = b0 & 0x1f
         if t == 9 and nals:
-            # AUD suivant atteint : frame précédente complète si elle porte des slices.
             return (nals, pos, "complete") if _has_slice(nals) else (None, pos, "bad")
-        if t not in VCL_TYPES:
-            return (None, pos, "bad")
         if pos + 4 + L > N:
             return (None, pos, "bad" if ended else "need_more")
         nals.append((t, bytes(ess[pos + 4:pos + 4 + L])))
         pos += 4 + L
 
 
+def _valid_frame_start(ess: bytearray, c: int, ended: bool) -> int:
+    """1 si un vrai début de frame est en `c`, 0 sinon, -2 si buffer insuffisant.
+
+    Un vrai AUD vidéo est suivi d'un NAL SEI/slice framé avcC — contrôle qui rejette
+    les faux `00 00 00 02 09` pouvant apparaître dans le PCM (silence).
+    """
+    N = len(ess)
+    if c + 6 > N:
+        return -2 if not ended else 0
+    if ess[c:c + 4] != b"\x00\x00\x00\x02" or (ess[c + 4] & 0x1f) != 9:
+        return 0
+    p = c + 6
+    if p + 5 > N:
+        return -2 if not ended else 0
+    L = struct.unpack(">I", ess[p:p + 4])[0]
+    b0 = ess[p + 4]
+    if not (1 <= L <= MAX_NAL) or (b0 & 0x80) != 0 or (b0 & 0x1f) not in NAL_AFTER_AUD:
+        return 0
+    return 1
+
+
+def _find_next_frame_start(ess: bytearray, frm: int, ended: bool) -> int:
+    """Prochain **vrai** début de frame ≥ `frm`. Retourne offset, -1 (aucun, ended) ou -2 (need more)."""
+    pos = frm
+    while True:
+        a = ess.find(AVCC_AUD, pos)
+        if a < 0:
+            return -1 if ended else -2
+        v = _valid_frame_start(ess, a, ended)
+        if v == 1:
+            return a
+        if v == -2:
+            return -2
+        pos = a + 5
+
+
 def _has_slice(nals) -> bool:
     return any(t in (1, 5) for t, _ in nals)
 
 
-# --- Référence : SPS/PPS + fps ---------------------------------------------
+# --- Référence : SPS/PPS + fps + layout audio ------------------------------
 
 def _reference_params(ffmpeg: str, ffprobe: str, ref_path: str, tmp_dir: Path):
     """Extrait SPS + PPS (Annex-B, 1re frame) et le fps de la référence saine."""
@@ -309,8 +396,7 @@ def _reference_params(ffmpeg: str, ffprobe: str, ref_path: str, tmp_dir: Path):
             elif t == 8:
                 pps.append(payload)
         ref_h264.unlink(missing_ok=True)
-    fps = _reference_fps(ffprobe, ref_path)
-    return sps[:1], pps[:8], fps
+    return sps[:1], pps[:8], _reference_fps(ffprobe, ref_path)
 
 
 def _reference_fps(ffprobe: str, ref_path: str) -> str:
@@ -323,11 +409,32 @@ def _reference_fps(ffprobe: str, ref_path: str) -> str:
         val = (p.stdout or "").strip()
         if re.fullmatch(r"\d+/\d+", val):
             num, den = val.split("/")
-            if int(den) != 0:
-                return val if int(num) else "25"
+            if int(den) != 0 and int(num):
+                return val
     except Exception:
         pass
     return "25"
+
+
+def _run_subprocess(argv, ctx: RepairContext, log_path: Path) -> None:
+    """Lance ffmpeg (mux) avec publication du PID + annulation (non-négociable d)."""
+    log = open(log_path, "wb")
+    proc = subprocess.Popen(argv, stdout=log, stderr=log, start_new_session=True)
+    ctx.on_child_pid(proc.pid)
+    try:
+        while proc.poll() is None:
+            if ctx.is_canceled():
+                _kill(proc)
+                raise Canceled()
+            time.sleep(0.1)
+        rc = proc.returncode
+        if rc != 0:
+            raise ToolFailed(argv, rc, _tail(log_path))
+    finally:
+        ctx.on_child_pid(None)
+        log.close()
+        if proc.poll() is None:
+            _kill(proc)
 
 
 def _tail(path: Path, n: int = 2000) -> str:
