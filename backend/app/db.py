@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     method_id        TEXT NOT NULL,
     media_scope      TEXT NOT NULL,       -- 'audio' | 'video' | 'both'
     slice_kind       TEXT NOT NULL,       -- '1min' | '5min' | 'full'
+    gop_mode         TEXT DEFAULT 'auto', -- 'auto' | 'all-intra' | 'long-gop' (sony-rsv)
     status           TEXT NOT NULL,       -- queued|running|succeeded|failed|canceled
     step             TEXT,
     percent          INTEGER DEFAULT 0,
@@ -76,8 +77,17 @@ def init_db(db_path: str) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
     finally:
         conn.close()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Migrations idempotentes pour les bases existantes (CREATE IF NOT EXISTS ne
+    rajoute pas les colonnes ajoutées après coup)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    if "gop_mode" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN gop_mode TEXT DEFAULT 'auto'")
 
 
 @contextmanager

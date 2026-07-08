@@ -9,6 +9,7 @@ import type {
   ApplicableResponse,
   CompatCheck,
   Diagnostic,
+  GopMode,
   Job,
   JobEvent,
   MediaScope,
@@ -39,6 +40,7 @@ export interface RecoveryState {
   refError: string | null;
   scope: MediaScope;
   slice: SliceKind;
+  gopMode: GopMode; // 'auto' | 'all-intra' | 'long-gop' (sony-rsv)
   methodId: string; // 'auto' | id concret
   live: JobEvent | null; // job en cours (progression)
   activePreviewJobId: string | null;
@@ -61,6 +63,7 @@ const initial: RecoveryState = {
   refError: null,
   scope: "both",
   slice: "1min",
+  gopMode: "auto",
   methodId: "auto",
   live: null,
   activePreviewJobId: null,
@@ -86,6 +89,7 @@ export function useRecovery() {
   const setReferencePath = useCallback((referencePath: string) => patch({ referencePath }), [patch]);
   const setScope = useCallback((scope: MediaScope) => patch({ scope }), [patch]);
   const setSlice = useCallback((slice: SliceKind) => patch({ slice }), [patch]);
+  const setGopMode = useCallback((gopMode: GopMode) => patch({ gopMode }), [patch]);
   const setMethod = useCallback((methodId: string) => patch({ methodId }), [patch]);
 
   // --- Analyse -------------------------------------------------------------
@@ -158,6 +162,7 @@ export function useRecovery() {
           media_scope: st.scope,
           slice: { kind: slice },
           reference_id: st.referenceId ?? undefined,
+          gop_mode: st.gopMode,
         });
         untrack.current = trackJob(created.job_id, {
           onProgress: (e) => patch({ live: e }),
@@ -274,6 +279,7 @@ export function useRecovery() {
     setReferencePath,
     setScope,
     setSlice,
+    setGopMode,
     setMethod,
     analyze,
     attachReference,

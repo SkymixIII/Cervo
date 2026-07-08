@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from ..config import Config
 from ..db import connect
-from ..pipeline import pipeline as pl
+from ..pipeline import cache, pipeline as pl
 from ..pipeline.runner import Canceled, ToolFailed, kill_pid_group
 from ..methods import base as methods
 from . import media_registry
@@ -48,15 +48,17 @@ def reap_orphan_jobs(db_path: str) -> int:
 
 
 def create_job(cfg: Config, *, source_id: str, method_id: str, media_scope: str,
-               slice_kind: str, reference_id: str | None, parent_job_id: str | None = None) -> dict:
+               slice_kind: str, reference_id: str | None, parent_job_id: str | None = None,
+               gop_mode: str = "auto") -> dict:
     jid = "job_" + uuid.uuid4().hex[:12]
     conn = connect(cfg.db_path)
     try:
         conn.execute(
             "INSERT INTO jobs(id, source_id, reference_id, method_id, media_scope, slice_kind, "
-            "status, step, percent, parent_job_id, created_at) "
-            "VALUES(?,?,?,?,?,?, 'queued', 'queued', 0, ?, ?)",
-            (jid, source_id, reference_id, method_id, media_scope, slice_kind, parent_job_id, _now()),
+            "gop_mode, status, step, percent, parent_job_id, created_at) "
+            "VALUES(?,?,?,?,?,?,?, 'queued', 'queued', 0, ?, ?)",
+            (jid, source_id, reference_id, method_id, media_scope, slice_kind, gop_mode,
+             parent_job_id, _now()),
         )
     finally:
         conn.close()
@@ -178,7 +180,7 @@ def run_job_worker(job_id: str, cfg_dict: dict) -> None:
             media_scope=job["media_scope"],
             slice_kind=job["slice_kind"],
             diagnostic=source.get("diagnostic"),
-            options={},
+            options={"gop_mode": job.get("gop_mode") or "auto"},
             is_canceled=is_canceled,
             on_child_pid=on_child_pid,
             on_step=on_step,
@@ -186,7 +188,8 @@ def run_job_worker(job_id: str, cfg_dict: dict) -> None:
         _update(
             db_path, job_id,
             status="succeeded", step="done", percent=100, child_pid=None,
-            cache_key=f"{source['cache_hash']}:{result.method_id}:{reference_hash}",
+            cache_key=cache.cache_key(source["cache_hash"], result.method_id, reference_hash,
+                                      result.variant),
             repair_cache_hit=1 if result.repair_cache_hit else 0,
             artifact_path=result.artifact_path, preview_path=result.preview_path,
             finished_at=_now(),

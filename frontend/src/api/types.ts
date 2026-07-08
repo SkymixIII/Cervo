@@ -71,6 +71,7 @@ export interface CompatCheck {
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type MediaScope = "audio" | "video" | "both";
 export type SliceKind = "1min" | "5min" | "full";
+export type GopMode = "auto" | "all-intra" | "long-gop"; // sony-rsv : structure GOP
 
 export interface Job {
   job_id: string;

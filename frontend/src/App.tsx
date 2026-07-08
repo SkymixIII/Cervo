@@ -6,10 +6,15 @@ import { DiagnosticCard } from "./components/DiagnosticCard";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { FileInput } from "./components/FileInput";
 import { ReferenceFileInput } from "./components/ReferenceFileInput";
-import { MediaScopeSelector, MethodSelector, SliceSelector } from "./components/Selectors";
+import {
+  GopModeSelector,
+  MediaScopeSelector,
+  MethodSelector,
+  SliceSelector,
+} from "./components/Selectors";
 import { StatusPanel } from "./components/StatusPanel";
 import { VideoPlayer } from "./components/VideoPlayer";
-import { SCOPE_LABEL, SLICE_LABEL } from "./labels";
+import { GOP_LABEL, SCOPE_LABEL, SLICE_LABEL } from "./labels";
 import { useRecovery } from "./hooks/useRecovery";
 
 export default function App() {
@@ -63,6 +68,9 @@ export default function App() {
           {analyzed && s.diagnostic?.recoverable && (
             <>
               <MediaScopeSelector value={s.scope} onChange={r.setScope} diagnostic={s.diagnostic} />
+              {s.diagnostic?.container === "sony-rsv" && (
+                <GopModeSelector value={s.gopMode} onChange={r.setGopMode} />
+              )}
               <SliceSelector
                 value={s.slice}
                 onChange={(v) => (s.step === "done" ? r.switchSlice(v) : r.setSlice(v))}
@@ -89,6 +97,7 @@ export default function App() {
                 <div className="recap">
                   {SCOPE_LABEL[s.scope]} · {SLICE_LABEL[s.slice]} ·{" "}
                   {s.methodId === "auto" ? "Auto" : s.methodId}
+                  {s.diagnostic?.container === "sony-rsv" ? ` · GOP ${GOP_LABEL[s.gopMode]}` : ""}
                   {s.referenceId ? " · réf. fournie" : ""}
                 </div>
                 {refBlocking && (

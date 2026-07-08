@@ -3,10 +3,22 @@
 Validé par le **Spike 02** (docs/spike/spike-02-mxf.md + docs/spike/poc-rsv/) :
 le `.rsv` du PXW-Z200 n'est **ni MP4 ni MXF** — c'est un conteneur de récupération
 **propriétaire Sony** (blocs KLV privés à pas 11264 o) contenant l'essence
-**XAVC-I (H.264 All-Intra 4:2:2 10-bit)** + **PCM 24-bit**, écrite AVANT finalisation.
+**XAVC (H.264 4:2:2 10-bit)** + **PCM 24-bit**, écrite AVANT finalisation.
 Aucun outil sur étagère ne le lit (ffmpeg/bmx le rejettent).
 
-Structure décodée (Spike 02 + Incrément 4/audio) :
+**Mode GOP (Incrément 5)** — l'essence peut être :
+- **All-Intra (XAVC-I)** : chaque frame est une I autonome, PTS=DTS, mux ffmpeg direct.
+- **Long-GOP (XAVC-L)** : I/P/**B** (ex. `B B I B B P…`). Les frames sont stockées en
+  **ordre de décodage** ; un mux naïf `-r fps` fige PTS=DTS en ordre de décodage →
+  les B-frames s'affichent au mauvais instant = **saccade** + DTS troués/non-monotones.
+  Correction (sans réencoder) : **MP4Box (GPAC)** importe l'Annex-B et calcule les
+  **offsets de composition (ctts) depuis le POC** → PTS réordonné (affichage) + DTS
+  uniforme monotone (décodage), exactement comme la référence saine. L'audio PCM est
+  ensuite muxé par ffmpeg `-c copy` en **conservant** ces timestamps.
+Le mode est piloté par `options['gop_mode']` ∈ {`auto`, `all-intra`, `long-gop`} ;
+`auto` (défaut) détecte la présence de P/B via le **slice_type** des slice headers.
+
+Structure décodée (Spike 02 + Incréments 4/5) :
 - **Vidéo** : NAL H.264 framés **avcC** `[u32 len][NAL]` — access units `AUD+SEI+slices`.
   SPS/PPS pris dans la **référence** (byte-identiques). Frontière de frame = AUD.
 - **Audio** : chunks **PCM s24be 4 canaux entrelacés** insérés entre les GOP vidéo,
@@ -14,10 +26,11 @@ Structure décodée (Spike 02 + Incrément 4/audio) :
 
 Reconstruction (streaming, mémoire bornée — le fichier va jusqu'à ~70 Go) :
   1. **de-chunk** du framing Sony (retire les clusters KLV) ;
-  2. **carve** vidéo (frames) + **collecte** audio (chunks) en UN SEUL passage ;
+  2. **carve** vidéo (frames) + **collecte** audio (chunks) en UN SEUL passage —
+     le flux démarre sur la **1re frame intra** (B/P orphelines de tête droppées) ;
   3. écrit un **Annex-B vidéo** (SPS/PPS de la référence + slices) et un **PCM audio**
      dans des fichiers temporaires (jamais tout en RAM) ;
-  4. **mux** ffmpeg → MP4 (vidéo + audio) avec fps/timescale de la référence.
+  4. **mux** → MP4 : ffmpeg (all-intra) OU MP4Box + ffmpeg (long-gop, réordonnancement B).
 
 L'artefact réparé contient **toujours vidéo + audio** ; le périmètre média
 (`audio`/`video`/`both`) est appliqué en aval par le slice `-c copy` (`-map`).
@@ -55,6 +68,9 @@ AUDIO_RATE = 48000
 AUDIO_CH = 4
 AUDIO_BYTES_PER_SF = AUDIO_CH * 3
 
+# Modes GOP sélectionnables (Incrément 5). `auto` = détection depuis l'essence.
+GOP_MODES = ("auto", "all-intra", "long-gop")
+
 
 def _ber_len(buf: bytes, off: int):
     """Décode une longueur BER à `off`. Retourne (valeur, octets_consommés) ou (None,None)."""
@@ -77,8 +93,9 @@ class SonyRsvRebuild:
     def capabilities(self) -> dict:
         return {
             "containers": ["sony-rsv"],
-            "codecs": ["h264", "xavc-i"],
-            "tracks": ["video", "audio"],     # audio PCM 4 canaux (Incrément 4/audio)
+            "codecs": ["h264", "xavc-i", "xavc-l"],   # All-Intra ET Long-GOP (Incrément 5)
+            "tracks": ["video", "audio"],             # audio PCM 4 canaux (Incrément 4/audio)
+            "gop_modes": list(GOP_MODES),             # auto | all-intra | long-gop
         }
 
     def can_handle(self, diagnostic: dict, options: dict) -> Applicability:
@@ -111,17 +128,41 @@ class SonyRsvRebuild:
         out_path = ctx.tmp_dir / "repaired.mp4"
 
         # 1) passage streaming unique : sépare vidéo (Annex-B) et audio (PCM brut).
-        frames, audio_bytes = self._stream_carve(ctx, sps, pps, video_h264, audio_pcm,
-                                                 frame_audio_bytes)
+        frames, audio_bytes, saw_pb = self._stream_carve(
+            ctx, sps, pps, video_h264, audio_pcm, frame_audio_bytes)
         if frames == 0:
             raise RuntimeError("Aucune frame reconstruite depuis le `.rsv` (framing inattendu ?).")
+        has_audio = audio_bytes >= AUDIO_BYTES_PER_SF
 
-        # 2) mux ffmpeg : vidéo + audio (si présent).
+        # 2) mode GOP : `auto` détecte depuis l'essence (P/B ⇒ long-gop), sinon forcé.
+        requested = str(ctx.options.get("gop_mode") or "auto").lower()
+        if requested not in GOP_MODES:
+            requested = "auto"
+        detected = "long-gop" if saw_pb else "all-intra"
+        effective = detected if requested == "auto" else requested
+
+        # 3) mux → MP4 selon le mode.
+        if effective == "long-gop":
+            self._mux_long_gop(ctx, video_h264, audio_pcm, out_path, fps, has_audio)
+        else:
+            self._mux_all_intra(ctx, video_h264, audio_pcm, out_path, fps, has_audio)
+
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            raise RuntimeError("Le mux n'a produit aucun MP4.")
+        # temporaires volumineux : libérer tout de suite (l'artefact est publié à part).
+        video_h264.unlink(missing_ok=True)
+        audio_pcm.unlink(missing_ok=True)
+        ctx.on_progress(100.0)
+        return out_path
+
+    def _mux_all_intra(self, ctx: RepairContext, video_h264: Path, audio_pcm: Path,
+                       out_path: Path, fps: str, has_audio: bool) -> None:
+        """Mux All-Intra : ffmpeg direct. Chaque frame est une I ⇒ PTS=DTS correct."""
+        ffmpeg = getattr(ctx.cfg, "ffmpeg", "ffmpeg")
         argv = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
             "-fflags", "+genpts", "-r", fps, "-f", "h264", "-i", str(video_h264),
         ]
-        has_audio = audio_bytes >= AUDIO_BYTES_PER_SF
         if has_audio:
             argv += ["-f", "s24be", "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-i", str(audio_pcm),
                      "-map", "0:v:0", "-map", "1:a:0"]
@@ -129,25 +170,58 @@ class SonyRsvRebuild:
             argv += ["-map", "0:v:0"]
         argv += ["-c", "copy", "-video_track_timescale", "25000",
                  "-movflags", "+faststart", str(out_path)]
-
         ctx.on_progress(92.0)
         _run_subprocess(argv, ctx, ctx.tmp_dir / "ffmpeg.log")
 
-        if not out_path.exists() or out_path.stat().st_size == 0:
-            raise RuntimeError("Le mux ffmpeg n'a produit aucun MP4.")
-        # temporaires volumineux : libérer tout de suite (l'artefact est publié à part).
-        video_h264.unlink(missing_ok=True)
-        audio_pcm.unlink(missing_ok=True)
-        ctx.on_progress(100.0)
-        return out_path
+    def _mux_long_gop(self, ctx: RepairContext, video_h264: Path, audio_pcm: Path,
+                      out_path: Path, fps: str, has_audio: bool) -> None:
+        """Mux Long-GOP : MP4Box réordonne les B-frames (ctts via POC) puis ffmpeg ajoute
+        l'audio en `-c copy` (timestamps conservés).
+
+        Le flux Annex-B est en ordre de **décodage** ; un mux ffmpeg `-r fps` figerait
+        PTS=DTS en ordre de décodage (saccade). MP4Box, à l'import H.264 brut, calcule les
+        **offsets de composition** depuis le POC → PTS en ordre d'**affichage** + DTS
+        uniforme monotone, **sans réencoder** (slices intactes, qualité préservée).
+        """
+        mp4box = getattr(ctx.cfg, "mp4box", "MP4Box")
+        ffmpeg = getattr(ctx.cfg, "ffmpeg", "ffmpeg")
+        reordered = ctx.tmp_dir / "video_reordered.mp4"
+        num, den = (int(x) for x in fps.split("/"))
+        fps_arg = str(num) if den == 1 else f"{num}/{den}"
+
+        # (a) MP4Box : import Annex-B → MP4 avec réordonnancement POC des B-frames.
+        ctx.on_progress(92.0)
+        _run_subprocess(
+            [mp4box, "-quiet", "-add", f"{video_h264}:fps={fps_arg}", "-new", str(reordered)],
+            ctx, ctx.tmp_dir / "mp4box.log")
+        if not reordered.exists() or reordered.stat().st_size == 0:
+            raise RuntimeError("MP4Box n'a produit aucun MP4 réordonné (Long-GOP).")
+        video_h264.unlink(missing_ok=True)   # libère ~taille source avant le mux audio
+
+        # (b) ffmpeg -c copy : rattache le PCM en conservant les timestamps réordonnés.
+        ctx.on_progress(96.0)
+        argv = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(reordered)]
+        if has_audio:
+            argv += ["-f", "s24be", "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-i", str(audio_pcm),
+                     "-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            argv += ["-map", "0:v:0"]
+        argv += ["-c", "copy", "-movflags", "+faststart", str(out_path)]
+        _run_subprocess(argv, ctx, ctx.tmp_dir / "ffmpeg.log")
+        reordered.unlink(missing_ok=True)
 
     def _stream_carve(self, ctx: RepairContext, sps, pps, video_h264: Path, audio_pcm: Path,
                       frame_audio_bytes: int):
         """Lit la source par blocs, de-chunke, sépare vidéo/audio. UN passage.
 
-        Retourne (nb_frames, nb_octets_audio). La dernière frame partielle est droppée.
-        Corrige aussi le drop de la frame qui précède chaque chunk audio (Incrément 4) :
-        une frame terminée par de l'audio (record non-NAL) est bien émise.
+        Retourne (nb_frames, nb_octets_audio, saw_pb). La dernière frame partielle est
+        droppée. Corrige aussi le drop de la frame qui précède chaque chunk audio
+        (Incrément 4) : une frame terminée par de l'audio (record non-NAL) est bien émise.
+
+        **Démarrage sur intra (Incrément 5)** : le flux n'est émis qu'à partir de la
+        **1re frame intra** (I/IDR) — toute B/P orpheline de tête (qui référencerait une
+        ancre absente) est droppée. `saw_pb` = True si des slices P/B ont été vues
+        (⇒ Long-GOP) — alimente la détection `auto`.
 
         **Sync audio** : chaque chunk audio est tronqué à `frames_depuis_dernier_chunk ×
         frame_audio_bytes` (le PCM réel est en tête, le padding en queue) → la durée
@@ -162,6 +236,8 @@ class SonyRsvRebuild:
         frames_since_audio = 0      # frames émises depuis le dernier chunk audio (verrou sync)
         audio_bytes = 0
         header_written = False
+        emitting = False            # passe à True à la 1re frame intra (drop des orphelines)
+        saw_pb = False              # au moins une slice P/B vue ⇒ Long-GOP (détection auto)
 
         def flush_audio(chunk: bytes) -> int:
             nonlocal frames_since_audio
@@ -231,11 +307,20 @@ class SonyRsvRebuild:
                         if status == "bad":
                             cursor = a + 5
                             continue
-                        # frame complète (terminée par AUD ou par audio) → émise.
-                        emit_video(nals, first=not header_written)
-                        header_written = True
-                        frames += 1
-                        frames_since_audio += 1
+                        # frame complète (terminée par AUD ou par audio).
+                        kind = _frame_slice_kind(nals)
+                        if not emitting:
+                            # on attend la 1re intra : les B/P orphelines de tête sont droppées.
+                            if kind == "I":
+                                emitting = True
+                        if emitting:
+                            emit_video(nals, first=not header_written)
+                            header_written = True
+                            frames += 1
+                            frames_since_audio += 1
+                            if kind in ("P", "B"):
+                                saw_pb = True
+                        # avance le curseur quel que soit le sort de la frame (émise/droppée).
                         if status == "audio":
                             pending_audio = nextpos    # le chunk audio démarre ici
                         else:
@@ -253,7 +338,7 @@ class SonyRsvRebuild:
         finally:
             fv.close()
             fa.close()
-        return frames, audio_bytes
+        return frames, audio_bytes, saw_pb
 
 
 def _dechunk(buf: bytes, ended: bool):
@@ -364,6 +449,75 @@ def _find_next_frame_start(ess: bytearray, frm: int, ended: bool) -> int:
 
 def _has_slice(nals) -> bool:
     return any(t in (1, 5) for t, _ in nals)
+
+
+# --- slice_type (détection GOP + démarrage sur la 1re intra) ----------------
+
+def _deemulate(b: bytes) -> bytes:
+    """Retire les octets anti-émulation `03` d'une séquence `00 00 03` (RBSP)."""
+    out = bytearray()
+    zeros = 0
+    for x in b:
+        if zeros >= 2 and x == 3:
+            zeros = 0
+            continue
+        out.append(x)
+        zeros = zeros + 1 if x == 0 else 0
+    return bytes(out)
+
+
+class _BitReader:
+    __slots__ = ("data", "pos")
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.pos = 0
+
+    def _bit(self) -> int:
+        i = self.pos >> 3
+        if i >= len(self.data):
+            raise IndexError
+        b = (self.data[i] >> (7 - (self.pos & 7))) & 1
+        self.pos += 1
+        return b
+
+    def ue(self) -> int:
+        zeros = 0
+        while self._bit() == 0:
+            zeros += 1
+            if zeros > 31:
+                return 0
+        val = 0
+        for _ in range(zeros):
+            val = (val << 1) | self._bit()
+        return (1 << zeros) - 1 + val
+
+
+# slice_type % 5 : 0=P, 1=B, 2=I, 3=SP(≈P), 4=SI(≈I)
+_SLICE_KIND = {0: "P", 1: "B", 2: "I", 3: "P", 4: "I"}
+
+
+def _slice_kind_of(nal: bytes) -> str:
+    """'I'|'P'|'B' à partir d'un NAL de slice non-IDR (type 1). Défaut 'I' si illisible."""
+    try:
+        br = _BitReader(_deemulate(nal[1:9]))  # slice header après l'octet NAL
+        br.ue()                                # first_mb_in_slice
+        return _SLICE_KIND.get(br.ue() % 5, "I")
+    except (IndexError, ValueError):
+        return "I"
+
+
+def _frame_slice_kind(nals) -> str | None:
+    """Type de la frame ('I'|'P'|'B') depuis son 1er slice VCL. None si aucun slice.
+
+    Un slice **IDR** (NAL type 5) est par définition intra ⇒ 'I' sans parser.
+    """
+    for t, n in nals:
+        if t == 5:
+            return "I"
+        if t == 1:
+            return _slice_kind_of(n)
+    return None
 
 
 # --- Référence : SPS/PPS + fps + layout audio ------------------------------

@@ -8,6 +8,7 @@ import type {
   CompatCheck,
   Diagnostic,
   Envelope,
+  GopMode,
   Job,
   MediaScope,
   MethodInfo,
@@ -85,6 +86,7 @@ export const api = {
     media_scope: MediaScope;
     slice: { kind: SliceKind };
     reference_id?: string | null;
+    gop_mode?: GopMode;
   }) => call<{ job_id: string; status: string }>("/api/jobs", { method: "POST", body: JSON.stringify(body) }),
 
   getJob: (jobId: string) => call<Job>(`/api/jobs/${jobId}`),

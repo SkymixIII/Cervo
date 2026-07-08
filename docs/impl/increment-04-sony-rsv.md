@@ -103,8 +103,10 @@ L'utilisateur pourra lancer la récupération du **fichier 70 Go complet** depui
 - **Disque interne** : le passage écrit `video.h264` (~taille source) + `audio.pcm` puis mux →
   pic transitoire ~2× la source (supprimé après publication). Sur un rush 70 Go, prévoir l'espace
   de travail ; optimisable (mux via FIFO) si nécessaire.
-- **DTS/PTS** : `-r <fps>` + `+genpts` donnent un timing régulier ; avertissement muxer
-  cosmétique résiduel possible (sans impact décodage, cf. Spike 01/02).
+- **DTS/PTS** : ⚠️ **corrigé à l'Incrément 5** — le `.rsv` est en réalité **Long-GOP**
+  (I/P/**B**), pas All-Intra. `-r <fps>` figeait `PTS=DTS` en ordre de décodage → **saccade**
+  (l'avertissement muxer n'était **pas** cosmétique). Voir
+  `docs/impl/increment-05-gop-modes.md` (réordonnancement B via MP4Box + mode GOP).
 - **Profil caméra** : framing (vidéo **et** cadence audio) validé sur PXW-Z200 (ce firmware).
   À paramétrer par **profil caméra** avant d'élargir à d'autres modèles Sony.
 - **Durée estimée** : `null` au diagnostic (pas d'index avant reconstruction) — connue après repair.

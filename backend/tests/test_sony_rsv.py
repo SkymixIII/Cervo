@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.methods.sony_rsv_rebuild import (  # noqa: E402
     SONY_KLV_KEY, _dechunk, _walk_frame, _find_next_frame_start, AVCC_AUD,
+    _frame_slice_kind, _slice_kind_of,
 )
 
 
@@ -93,9 +94,45 @@ def test_find_next_frame_start_skips_false_aud_in_pcm() -> None:
     assert pos == len(false_aud), "le faux AUD dans le PCM doit être ignoré"
 
 
+def _ue_bits(v: int) -> str:
+    code = v + 1
+    return "0" * (code.bit_length() - 1) + bin(code)[2:]
+
+
+def _slice_nal(nal_type: int, slice_type: int) -> bytes:
+    """NAL de slice non-IDR : octet d'en-tête + slice header (first_mb=0, slice_type)."""
+    bits = _ue_bits(0) + _ue_bits(slice_type) + "1"      # + rbsp_stop_one_bit
+    bits += "0" * (-len(bits) % 8)
+    body = int(bits, 2).to_bytes(len(bits) // 8, "big")
+    return bytes([0x20 | nal_type]) + body               # nal_ref_idc=1 | type
+
+
+def test_slice_kind_detection() -> None:
+    # slice_type % 5 : 0/5=P, 1/6=B, 2/7=I  (5..9 = "toutes les slices du même type")
+    assert _slice_kind_of(_slice_nal(1, 7)) == "I"       # I (all-I, XAVC-I)
+    assert _slice_kind_of(_slice_nal(1, 2)) == "I"
+    assert _slice_kind_of(_slice_nal(1, 5)) == "P"       # P (Long-GOP)
+    assert _slice_kind_of(_slice_nal(1, 0)) == "P"
+    assert _slice_kind_of(_slice_nal(1, 6)) == "B"       # B (Long-GOP)
+    assert _slice_kind_of(_slice_nal(1, 1)) == "B"
+
+
+def test_frame_slice_kind_idr_and_types() -> None:
+    # une frame avec un slice IDR (type 5) est intra sans parser le slice header.
+    assert _frame_slice_kind([(9, b"\x09"), (6, b"\x06"), (5, b"\x65\x88")]) == "I"
+    # frame P : premier slice VCL de type 1, slice_type P.
+    assert _frame_slice_kind([(9, b"\x09"), (1, _slice_nal(1, 5))]) == "P"
+    # frame B.
+    assert _frame_slice_kind([(9, b"\x09"), (1, _slice_nal(1, 6))]) == "B"
+    # aucune slice → None.
+    assert _frame_slice_kind([(9, b"\x09"), (6, b"\x06")]) is None
+
+
 if __name__ == "__main__":
     test_dechunk_strips_sony_clusters()
     test_walk_frame_drops_last_partial()
     test_frame_before_audio_not_dropped()
     test_find_next_frame_start_skips_false_aud_in_pcm()
-    print("[PASS] framing Sony .rsv : de-chunk + drop frame partielle + audio (délim + anti-drop)")
+    test_slice_kind_detection()
+    test_frame_slice_kind_idr_and_types()
+    print("[PASS] framing Sony .rsv : de-chunk + drop frame partielle + audio + détection GOP")

@@ -1,7 +1,7 @@
 // Segmented controls des options (02 A3) : périmètre média, tranche, méthode.
 
-import type { ApplicableResponse, Diagnostic, MediaScope, SliceKind } from "../api/types";
-import { SCOPE_LABEL, SLICE_LABEL } from "../labels";
+import type { ApplicableResponse, Diagnostic, GopMode, MediaScope, SliceKind } from "../api/types";
+import { GOP_LABEL, SCOPE_LABEL, SLICE_LABEL } from "../labels";
 
 // --- Périmètre média : Son / Vidéo / Les deux -------------------------------
 export function MediaScopeSelector({
@@ -69,6 +69,40 @@ export function SliceSelector({
       <p className="note">
         La réparation prend le <b>même temps</b> quelle que soit la tranche. Choisir 1 min sert juste
         à <b>contrôler le rendu vite</b> avant d'exposer l'intégrale — l'affichage, lui, est instantané.
+      </p>
+    </div>
+  );
+}
+
+// --- Structure GOP : Auto / Long-GOP / All-Intra (sony-rsv) -----------------
+// Visible uniquement pour les `.rsv` Sony : l'essence peut être All-Intra (XAVC-I)
+// ou Long-GOP (XAVC-L, avec B-frames). `Auto` détecte depuis l'essence.
+export function GopModeSelector({
+  value,
+  onChange,
+}: {
+  value: GopMode;
+  onChange: (v: GopMode) => void;
+}) {
+  const opts: GopMode[] = ["auto", "long-gop", "all-intra"];
+  return (
+    <div className="field">
+      <label className="field-label">Structure GOP</label>
+      <div className="segmented">
+        {opts.map((o) => (
+          <button
+            key={o}
+            className={`seg ${value === o ? "seg-active" : ""}`}
+            onClick={() => onChange(o)}
+          >
+            {o === "auto" ? "Auto (recommandé)" : GOP_LABEL[o]}
+          </button>
+        ))}
+      </div>
+      <p className="note">
+        <b>Auto</b> détecte tout seul si la vidéo est <b>Long-GOP</b> (I/P/B — le cas de ce
+        Sony) ou <b>All-Intra</b>. Le Long-GOP réordonne les images (B-frames) pour une
+        lecture fluide. Ne forcez un mode que si l'auto se trompe.
       </p>
     </div>
   );

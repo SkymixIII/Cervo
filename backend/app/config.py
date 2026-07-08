@@ -35,6 +35,10 @@ class Config:
     ffmpeg: str
     ffprobe: str
     untrunc_cmd: str
+    # MP4Box (GPAC) — réordonnancement des B-frames Long-GOP (ctts via POC), sans
+    # réencoder. Requis par `sony-rsv-rebuild` en mode long-gop (DockerManager :
+    # ajouter le paquet `gpac` à l'image).
+    mp4box: str
     # Paramètres du hash de cache non-intégral (non-négociable c).
     hash_sample_count: int
     hash_sample_bytes: int
@@ -53,6 +57,7 @@ class Config:
             ffmpeg=os.environ.get("APP_FFMPEG", "ffmpeg"),
             ffprobe=os.environ.get("APP_FFPROBE", "ffprobe"),
             untrunc_cmd=os.environ.get("APP_UNTRUNC_CMD", "untrunc"),
+            mp4box=os.environ.get("APP_MP4BOX", "MP4Box"),
             hash_sample_count=int(os.environ.get("APP_HASH_SAMPLES", "4")),
             hash_sample_bytes=int(os.environ.get("APP_HASH_SAMPLE_BYTES", str(1 << 20))),
         )

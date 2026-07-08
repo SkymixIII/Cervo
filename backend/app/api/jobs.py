@@ -26,6 +26,7 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 VALID_SCOPES = {"audio", "video", "both"}
 VALID_SLICES = {"1min", "5min", "full"}
+VALID_GOP_MODES = {"auto", "all-intra", "long-gop"}
 
 
 class SliceSpec(BaseModel):
@@ -38,6 +39,7 @@ class CreateJob(BaseModel):
     media_scope: str = "both"
     slice: SliceSpec = SliceSpec()
     reference_id: str | None = None
+    gop_mode: str = "auto"      # sony-rsv : 'auto' | 'all-intra' | 'long-gop'
 
 
 def _job_public(job: dict) -> dict:
@@ -48,6 +50,7 @@ def _job_public(job: dict) -> dict:
         "method_id": job["method_id"],
         "media_scope": job["media_scope"],
         "slice_kind": job["slice_kind"],
+        "gop_mode": job.get("gop_mode") or "auto",
         "progress": {"step": job.get("step"), "percent": job.get("percent") or 0},
         "repair_cache_hit": bool(job.get("repair_cache_hit")),
         "parent_job_id": job.get("parent_job_id"),
@@ -66,6 +69,8 @@ def create_job(body: CreateJob, request: Request, cfg: Config = Depends(get_cfg)
         return env.err(env.VALIDATION_ERROR, f"media_scope invalide: {body.media_scope}")
     if body.slice.kind not in VALID_SLICES:
         return env.err(env.VALIDATION_ERROR, f"slice.kind invalide: {body.slice.kind}")
+    if body.gop_mode not in VALID_GOP_MODES:
+        return env.err(env.VALIDATION_ERROR, f"gop_mode invalide: {body.gop_mode}")
 
     source = media_registry.get_media(cfg, body.source_id)
     if source is None:
@@ -90,7 +95,7 @@ def create_job(body: CreateJob, request: Request, cfg: Config = Depends(get_cfg)
     job = job_manager.create_job(
         cfg, source_id=body.source_id, method_id=body.method_id,
         media_scope=body.media_scope, slice_kind=body.slice.kind,
-        reference_id=body.reference_id,
+        reference_id=body.reference_id, gop_mode=body.gop_mode,
     )
     job_manager.submit(cfg, get_pool(request), job["id"])
     return env.ok({"job_id": job["id"], "status": "queued"}, status_code=202)
@@ -122,6 +127,7 @@ def extend_job(job_id: str, request: Request, cfg: Config = Depends(get_cfg)):
         cfg, source_id=parent["source_id"], method_id=parent["method_id"],
         media_scope=parent["media_scope"], slice_kind="full",
         reference_id=parent["reference_id"], parent_job_id=job_id,
+        gop_mode=parent.get("gop_mode") or "auto",
     )
     job_manager.submit(cfg, get_pool(request), child["id"])
     return env.ok({"job_id": child["id"], "status": "queued", "parent_job_id": job_id},
