@@ -1,15 +1,31 @@
 # MediaNotFound — un seul `docker compose up` lance tout.
 # UI accessible sur http://localhost:${MNF_PORT:-8080} (seul port publié).
 #
-# Topologie : web (nginx) + app (backend + untrunc + ffmpeg embarqués) via
-# compose, plutôt qu'un mono-conteneur — deux images plus simples/standards à
-# construire et déboguer séparément, au prix de deux process au lieu d'un.
-# Compromis assumé explicitement (cf. arbitrage MAJ-15) : reste UNE commande,
-# UN port pour l'utilisateur, ce qui est l'exigence produit.
+# Topologie : web (nginx) + app (backend + untrunc + ffmpeg + MP4Box/gpac
+# embarqués) via compose, plutôt qu'un mono-conteneur — deux images plus
+# simples/standards à construire et déboguer séparément, au prix de deux
+# process au lieu d'un. Compromis assumé explicitement (cf. arbitrage MAJ-15) :
+# reste UNE commande, UN port pour l'utilisateur, ce qui est l'exigence produit.
 #
-# Déposez vos fichiers (source abîmée + référence saine) dans ./media (ou tout
-# dossier pointé par MNF_MEDIA_DIR) : ils apparaissent dans le conteneur sous
-# /media, exactement le chemin attendu par le champ de saisie de l'UI.
+# Disques utilisateur montés SOUS la racine média (APP_MEDIA_ROOT=/media,
+# fixé dans backend/Dockerfile) :
+#   - ${MNF_VOLUMES_DIR:-/Volumes} (disques externes macOS, dont TOM) -> /media/Volumes
+#   - ${HOME}                      (dossier utilisateur)              -> /media/home
+# Les deux en LECTURE SEULE (:ro) — le navigateur de fichiers (`/api/browse`)
+# ne fait que lister/lire, jamais écrire dans ces arbres.
+#
+# ⚠️ macOS + Docker Desktop : /Volumes n'est PAS partagé par défaut. Il faut
+# l'ajouter dans Docker Desktop > Settings > Resources > File Sharing (ajouter
+# `/Volumes`), sinon le bind mount démarre mais reste VIDE côté conteneur.
+# Voir docs/impl/increment-07-docker-repackaging.md pour la procédure et la
+# vérification.
+#
+# WORK ROOT : la récupération écrit un artefact réparé ~2x la taille de la
+# source (jusqu'à ~140 Go pour 70 Go) + les tranches. Le disque interne peut
+# être trop petit -> APP_WORK_ROOT est bind-monté vers un dossier HOST avec de
+# l'espace, configurable via MNF_WORK_DIR (défaut : un dossier sur le disque
+# externe TOM, à créer s'il n'existe pas). Changez MNF_WORK_DIR si TOM n'est
+# pas votre disque ou n'est pas monté.
 
 services:
   app:
@@ -19,9 +35,12 @@ services:
     restart: unless-stopped
     volumes:
       - mnf_data:/data
-      - ${MNF_MEDIA_DIR:-./media}:/media
+      - ${MNF_VOLUMES_DIR:-/Volumes}:/media/Volumes:ro
+      - ${HOME}:/media/home:ro
+      - ${MNF_WORK_DIR:-/Volumes/TOM/mnf_work}:/work
     environment:
       APP_WORKERS: "2"
+      APP_WORK_ROOT: /work
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 15s

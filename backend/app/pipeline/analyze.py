@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from .atoms import atom_presence
+from .atoms import atom_presence, is_sony_rsv
 
 
 def _ffprobe(ffprobe_bin: str, path: str) -> dict | None:
@@ -39,6 +39,24 @@ def _codec_family(video_codec: str | None) -> str:
 
 def analyze(ffprobe_bin: str, path: str) -> dict:
     atoms = atom_presence(path)
+
+    # --- Cas .rsv Sony (Spike 02) : conteneur de récupération propriétaire Sony,
+    #     PAS un MP4/MXF. ffprobe n'y voit rien ; on diagnostique par la clé KLV
+    #     Sony. Essence = XAVC-I (H.264 All-Intra) ; réparable via référence par
+    #     la méthode `sony-rsv-rebuild`. ---
+    if not atoms["ftyp"] and is_sony_rsv(path):
+        return {
+            "container": "sony-rsv",
+            "atoms": {"ftyp": False, "mdat": True, "moov": False},
+            "brand": "XAVC",
+            "codec": {"family": "xavc-i", "video": "h264", "audio": "pcm_s24be"},
+            "estimated_duration_s": None,   # inconnu sans index (borné par la référence)
+            "tracks": [{"type": "video", "codec": "h264"}, {"type": "audio", "codec": "pcm_s24be"}],
+            "recoverable": True,
+            "recommendation": "reference_required",  # SPS/PPS + params viennent de la référence
+            "probe_readable": False,
+        }
+
     container = "mp4" if atoms["ftyp"] else "unknown"
 
     probe = _ffprobe(ffprobe_bin, path)

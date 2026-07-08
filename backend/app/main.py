@@ -15,7 +15,7 @@ from .db import init_db
 from .methods import base as methods
 from .pipeline import cache
 from .store import job_manager
-from .api import media, references, methods as methods_api, jobs
+from .api import media, references, methods as methods_api, jobs, browse
 
 
 @asynccontextmanager
@@ -45,6 +45,7 @@ app.include_router(media.router)
 app.include_router(references.router)
 app.include_router(methods_api.router)
 app.include_router(jobs.router)
+app.include_router(browse.router)
 
 
 @app.get("/api/health")

@@ -59,3 +59,9 @@ export const SLICE_LABEL: Record<string, string> = {
   "5min": "5 min",
   full: "Intégrale",
 };
+
+export const GOP_LABEL: Record<string, string> = {
+  auto: "Auto",
+  "long-gop": "Long-GOP",
+  "all-intra": "All-Intra",
+};

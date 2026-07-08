@@ -20,7 +20,7 @@ export interface Track {
 }
 
 export interface Diagnostic {
-  container: string; // 'mp4' | 'mxf' | 'unknown'
+  container: string; // 'mp4' | 'sony-rsv' | 'mxf' | 'unknown'
   atoms: { ftyp: boolean; mdat: boolean; moov: boolean };
   brand: string | null;
   codec: { family: string; video: string | null; audio: string | null };
@@ -71,6 +71,7 @@ export interface CompatCheck {
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type MediaScope = "audio" | "video" | "both";
 export type SliceKind = "1min" | "5min" | "full";
+export type GopMode = "auto" | "all-intra" | "long-gop"; // sony-rsv : structure GOP
 
 export interface Job {
   job_id: string;
@@ -83,6 +84,21 @@ export interface Job {
   parent_job_id: string | null;
   error?: ApiError;
   result?: { has_preview: boolean };
+}
+
+// Navigateur de fichiers (incrément 06) — chemins relatifs à la racine média.
+export interface BrowseEntry {
+  name: string;
+  type: "dir" | "file";
+  size: number | null; // octets (fichiers) ; null pour un dossier
+  ext: string | null; // extension sans point, minuscule ; null pour un dossier
+  is_media: boolean; // fichier récupérable (.rsv .mp4 .mov .mxf .mts .m2ts)
+}
+
+export interface BrowseResult {
+  cwd: string; // dossier courant, relatif à la racine média ('' = racine)
+  parent: string | null; // dossier parent (null si on est à la racine)
+  entries: BrowseEntry[]; // dossiers d'abord, puis fichiers média, puis autres
 }
 
 // Événement SSE (event: progress) — sous-ensemble du Job.

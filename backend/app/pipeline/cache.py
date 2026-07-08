@@ -25,14 +25,19 @@ from typing import Callable
 from ..db import connect
 
 
-def cache_key(source_hash: str, method_id: str, reference_hash: str) -> str:
-    return f"{source_hash}:{method_id}:{reference_hash}"
+def cache_key(source_hash: str, method_id: str, reference_hash: str, variant: str = "") -> str:
+    base = f"{source_hash}:{method_id}:{reference_hash}"
+    return f"{base}:{variant}" if variant else base
 
 
-def artifact_path(work_root: str, source_hash: str, method_id: str, reference_hash: str) -> Path:
-    return (
-        Path(work_root) / "repaired" / source_hash / method_id / reference_hash / "repaired.mp4"
-    )
+def artifact_path(work_root: str, source_hash: str, method_id: str, reference_hash: str,
+                  variant: str = "") -> Path:
+    # `variant` distingue des sorties de repair issues d'options différentes (ex. mode
+    # GOP de sony-rsv) : sans lui, deux modes se recouvriraient dans le cache.
+    base = Path(work_root) / "repaired" / source_hash / method_id / reference_hash
+    if variant:
+        base = base / variant
+    return base / "repaired.mp4"
 
 
 def _now() -> str:
@@ -160,6 +165,7 @@ def get_or_repair(
     is_canceled: Callable[[], bool],
     owner_job_id: str,
     on_wait: Callable[[], None] | None = None,
+    variant: str = "",
 ) -> tuple[Path, bool]:
     """Retourne `(chemin_artefact, cache_hit)`.
 
@@ -168,8 +174,8 @@ def get_or_repair(
     `owner_job_id` = le vrai id du job (MAJ-code-1), stocké dans le verrou et utilisé
     pour la détection de staleness (BLOQ-b-1).
     """
-    key = cache_key(source_hash, method_id, reference_hash)
-    canonical = artifact_path(work_root, source_hash, method_id, reference_hash)
+    key = cache_key(source_hash, method_id, reference_hash, variant)
+    canonical = artifact_path(work_root, source_hash, method_id, reference_hash, variant)
 
     # Cache hit direct : l'existence du fichier canonique est garantie atomique.
     if canonical.exists():

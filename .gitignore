@@ -1,4 +1,12 @@
-# Fichiers média déposés par l'utilisateur pour la récupération (bind mount
-# docker-compose ./media -> /media). Jamais commités.
+# Fichiers média déposés par l'utilisateur pour la récupération. Ancien bind
+# mount de dev (docker-compose ./media -> /media) — SUPERSÉDÉ par les mounts
+# disque (/Volumes, $HOME) de l'incrément 07 (docker-compose.yml), conservé
+# ici pour compat si un dossier ./media est encore utilisé en dev natif hors
+# Docker. Jamais commités.
 /media/*
 !/media/.gitkeep
+
+# Racine data/ par défaut (mode natif hors Docker, cf. backend/app/config.py
+# _default_root() = <repo>/data) : média, artefacts de repair (work/), SQLite.
+# Jamais commités (potentiellement volumineux + données personnelles).
+/data/

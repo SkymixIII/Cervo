@@ -2,19 +2,27 @@
 // (B) lecteur & statut, (C) principe/aide. Historique/verdict/download = hors
 // périmètre incrément 2 (endpoints backend absents).
 
+import { useState } from "react";
 import { DiagnosticCard } from "./components/DiagnosticCard";
 import { ErrorBanner } from "./components/ErrorBanner";
+import { FileBrowser } from "./components/FileBrowser";
 import { FileInput } from "./components/FileInput";
 import { ReferenceFileInput } from "./components/ReferenceFileInput";
-import { MediaScopeSelector, MethodSelector, SliceSelector } from "./components/Selectors";
+import {
+  GopModeSelector,
+  MediaScopeSelector,
+  MethodSelector,
+  SliceSelector,
+} from "./components/Selectors";
 import { StatusPanel } from "./components/StatusPanel";
 import { VideoPlayer } from "./components/VideoPlayer";
-import { SCOPE_LABEL, SLICE_LABEL } from "./labels";
+import { GOP_LABEL, SCOPE_LABEL, SLICE_LABEL } from "./labels";
 import { useRecovery } from "./hooks/useRecovery";
 
 export default function App() {
   const r = useRecovery();
   const s = r.state;
+  const [browserOpen, setBrowserOpen] = useState(false);
 
   const running = s.step === "running";
   const analyzed = s.step === "analyzed" || s.step === "done" || s.step === "failed";
@@ -46,8 +54,18 @@ export default function App() {
             value={s.sourcePath}
             onChange={r.setSourcePath}
             onSubmit={r.analyze}
+            onBrowse={() => setBrowserOpen(true)}
             busy={s.step === "analyzing"}
             submitLabel="Analyser"
+          />
+
+          <FileBrowser
+            open={browserOpen}
+            onClose={() => setBrowserOpen(false)}
+            onChoose={(rel) => {
+              setBrowserOpen(false);
+              void r.pickSource(rel);
+            }}
           />
 
           {s.step === "idle" && s.error && <ErrorBanner error={s.error} />}
@@ -63,6 +81,9 @@ export default function App() {
           {analyzed && s.diagnostic?.recoverable && (
             <>
               <MediaScopeSelector value={s.scope} onChange={r.setScope} diagnostic={s.diagnostic} />
+              {s.diagnostic?.container === "sony-rsv" && (
+                <GopModeSelector value={s.gopMode} onChange={r.setGopMode} />
+              )}
               <SliceSelector
                 value={s.slice}
                 onChange={(v) => (s.step === "done" ? r.switchSlice(v) : r.setSlice(v))}
@@ -89,6 +110,7 @@ export default function App() {
                 <div className="recap">
                   {SCOPE_LABEL[s.scope]} · {SLICE_LABEL[s.slice]} ·{" "}
                   {s.methodId === "auto" ? "Auto" : s.methodId}
+                  {s.diagnostic?.container === "sony-rsv" ? ` · GOP ${GOP_LABEL[s.gopMode]}` : ""}
                   {s.referenceId ? " · réf. fournie" : ""}
                 </div>
                 {refBlocking && (

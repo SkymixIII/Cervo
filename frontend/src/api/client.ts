@@ -5,9 +5,11 @@
 import type {
   ApiError,
   ApplicableResponse,
+  BrowseResult,
   CompatCheck,
   Diagnostic,
   Envelope,
+  GopMode,
   Job,
   MediaScope,
   MethodInfo,
@@ -60,6 +62,8 @@ export const api = {
   registerMedia: (path: string) =>
     call<RegisteredMedia>("/api/media", { method: "POST", body: JSON.stringify({ path }) }),
 
+  browse: (path: string) => call<BrowseResult>(`/api/browse?path=${encodeURIComponent(path)}`),
+
   analyze: (sourceId: string) =>
     call<Diagnostic>(`/api/media/${sourceId}/analyze`, { method: "POST" }),
 
@@ -85,6 +89,7 @@ export const api = {
     media_scope: MediaScope;
     slice: { kind: SliceKind };
     reference_id?: string | null;
+    gop_mode?: GopMode;
   }) => call<{ job_id: string; status: string }>("/api/jobs", { method: "POST", body: JSON.stringify(body) }),
 
   getJob: (jobId: string) => call<Job>(`/api/jobs/${jobId}`),

@@ -18,9 +18,12 @@ SLICE_DURATIONS = {"1min": 60, "5min": 300, "full": None}
 
 
 def slice_output_path(work_root: str, source_hash: str, method_id: str,
-                      reference_hash: str, scope: str, slice_kind: str) -> Path:
-    return (Path(work_root) / "slices" / source_hash / method_id / reference_hash
-            / scope / f"{slice_kind}.mp4")
+                      reference_hash: str, scope: str, slice_kind: str,
+                      variant: str = "") -> Path:
+    base = Path(work_root) / "slices" / source_hash / method_id / reference_hash
+    if variant:
+        base = base / variant
+    return base / scope / f"{slice_kind}.mp4"
 
 
 def build_slice_argv(ffmpeg_bin: str, src: str, dst: str, scope: str, slice_kind: str) -> list[str]:
@@ -53,8 +56,10 @@ def extract_slice(
     slice_kind: str,
     is_canceled: Callable[[], bool],
     on_child_pid: Callable[[int | None], None],
+    variant: str = "",
 ) -> Path:
-    dst = slice_output_path(work_root, source_hash, method_id, reference_hash, scope, slice_kind)
+    dst = slice_output_path(work_root, source_hash, method_id, reference_hash, scope, slice_kind,
+                            variant)
     dst.parent.mkdir(parents=True, exist_ok=True)
     # Cache de tranche (2e niveau, 03 §3.3) : déjà extraite → resservie.
     if dst.exists():

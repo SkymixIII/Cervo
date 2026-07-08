@@ -22,6 +22,7 @@ class PipelineResult:
     preview_path: str
     repair_cache_hit: bool
     method_id: str
+    variant: str = ""          # dimension de cache liée aux options (ex. mode GOP sony-rsv)
 
 
 def run_recovery(
@@ -61,6 +62,13 @@ def run_recovery(
                             f"La méthode {resolved_id} requiert un fichier de référence.",
                             "Fournissez une référence saine tournée avec les mêmes réglages.")
 
+    # Dimension de cache liée aux options : uniquement pour les méthodes qui déclarent
+    # des `gop_modes` (sony-rsv). Un mode GOP différent = un artefact de repair différent
+    # → doit avoir sa propre clé/chemin (sinon recouvrement dans le cache).
+    variant = ""
+    if "gop_modes" in (method.capabilities() or {}):
+        variant = str(options.get("gop_mode") or "auto")
+
     # 2) repair (UNE FOIS, caché) — non-négociables a & b via cache.get_or_repair.
     on_step("repair", 0.0)
 
@@ -88,6 +96,7 @@ def run_recovery(
         is_canceled=is_canceled,
         owner_job_id=job_id,
         on_wait=lambda: on_step("repair-attached", 50.0),
+        variant=variant,
     )
     on_step("repair", 100.0)
 
@@ -104,6 +113,7 @@ def run_recovery(
         slice_kind=slice_kind,
         is_canceled=is_canceled,
         on_child_pid=on_child_pid,
+        variant=variant,
     )
     on_step("validate", 50.0)
     if not cache.validate_decodable(cfg.ffprobe, str(preview)):
@@ -115,6 +125,7 @@ def run_recovery(
         preview_path=str(preview),
         repair_cache_hit=cache_hit,
         method_id=resolved_id,
+        variant=variant,
     )
 
 
