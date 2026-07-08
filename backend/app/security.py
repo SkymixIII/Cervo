@@ -44,3 +44,32 @@ def confine(user_path: str, media_root: str) -> str:
     if not os.access(resolved, os.R_OK):
         raise MediaFileNotFound(str(resolved))
     return str(resolved)
+
+
+def confine_dir(user_path: str, media_root: str) -> str:
+    """Résout un chemin de DOSSIER et garantit qu'il reste sous `media_root`.
+
+    Même barrière que `confine` (realpath + appartenance, symlinks compris), mais
+    la cible doit être un dossier lisible. Un chemin vide → la racine média
+    elle-même. Retourne le chemin absolu résolu. Lève `PathForbidden` si hors
+    racine, `MediaFileNotFound` si absent ou si ce n'est pas un dossier.
+    """
+    root = Path(media_root).resolve()
+    p = Path(user_path) if user_path else root
+    if not p.is_absolute():
+        p = root / p
+    resolved = p.resolve()
+
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise PathForbidden(
+            f"Chemin hors de la racine média autorisée ({root})."
+        )
+
+    if not resolved.is_dir():
+        raise MediaFileNotFound(str(resolved))
+    # Lecture + traversée (X) requises pour lister un dossier.
+    if not os.access(resolved, os.R_OK | os.X_OK):
+        raise MediaFileNotFound(str(resolved))
+    return str(resolved)

@@ -5,6 +5,7 @@
 import type {
   ApiError,
   ApplicableResponse,
+  BrowseResult,
   CompatCheck,
   Diagnostic,
   Envelope,
@@ -60,6 +61,8 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   registerMedia: (path: string) =>
     call<RegisteredMedia>("/api/media", { method: "POST", body: JSON.stringify({ path }) }),
+
+  browse: (path: string) => call<BrowseResult>(`/api/browse?path=${encodeURIComponent(path)}`),
 
   analyze: (sourceId: string) =>
     call<Diagnostic>(`/api/media/${sourceId}/analyze`, { method: "POST" }),

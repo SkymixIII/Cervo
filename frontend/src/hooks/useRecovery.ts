@@ -93,10 +93,13 @@ export function useRecovery() {
   const setMethod = useCallback((methodId: string) => patch({ methodId }), [patch]);
 
   // --- Analyse -------------------------------------------------------------
-  const analyze = useCallback(async () => {
-    const path = ref.current.sourcePath.trim();
+  // Coeur paramétré par le chemin : sert à la fois la saisie manuelle (`analyze`)
+  // et la sélection via le navigateur (`pickSource`), sans dépendre du délai de
+  // propagation d'un `setState` préalable.
+  const runAnalyze = useCallback(async (raw: string) => {
+    const path = raw.trim();
     if (!path) return;
-    patch({ busy: true, error: null, step: "analyzing", diagnostic: null, applicable: null,
+    patch({ busy: true, error: null, step: "analyzing", sourcePath: path, diagnostic: null, applicable: null,
       sourceId: null, referenceId: null, compat: null, sliceJobs: {}, activePreviewJobId: null });
     try {
       const media = await api.registerMedia(path);
@@ -121,6 +124,10 @@ export function useRecovery() {
       patch({ busy: false, step: "idle", error: errOf(e) });
     }
   }, [patch]);
+
+  const analyze = useCallback(() => runAnalyze(ref.current.sourcePath), [runAnalyze]);
+  // Sélection depuis le navigateur : renseigne le champ ET lance l'analyse.
+  const pickSource = useCallback((relpath: string) => runAnalyze(relpath), [runAnalyze]);
 
   // --- Référence -----------------------------------------------------------
   const attachReference = useCallback(async () => {
@@ -282,6 +289,7 @@ export function useRecovery() {
     setGopMode,
     setMethod,
     analyze,
+    pickSource,
     attachReference,
     launch,
     switchSlice,

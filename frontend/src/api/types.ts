@@ -86,6 +86,21 @@ export interface Job {
   result?: { has_preview: boolean };
 }
 
+// Navigateur de fichiers (incrément 06) — chemins relatifs à la racine média.
+export interface BrowseEntry {
+  name: string;
+  type: "dir" | "file";
+  size: number | null; // octets (fichiers) ; null pour un dossier
+  ext: string | null; // extension sans point, minuscule ; null pour un dossier
+  is_media: boolean; // fichier récupérable (.rsv .mp4 .mov .mxf .mts .m2ts)
+}
+
+export interface BrowseResult {
+  cwd: string; // dossier courant, relatif à la racine média ('' = racine)
+  parent: string | null; // dossier parent (null si on est à la racine)
+  entries: BrowseEntry[]; // dossiers d'abord, puis fichiers média, puis autres
+}
+
 // Événement SSE (event: progress) — sous-ensemble du Job.
 export interface JobEvent {
   job_id: string;

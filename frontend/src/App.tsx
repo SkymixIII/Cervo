@@ -2,8 +2,10 @@
 // (B) lecteur & statut, (C) principe/aide. Historique/verdict/download = hors
 // périmètre incrément 2 (endpoints backend absents).
 
+import { useState } from "react";
 import { DiagnosticCard } from "./components/DiagnosticCard";
 import { ErrorBanner } from "./components/ErrorBanner";
+import { FileBrowser } from "./components/FileBrowser";
 import { FileInput } from "./components/FileInput";
 import { ReferenceFileInput } from "./components/ReferenceFileInput";
 import {
@@ -20,6 +22,7 @@ import { useRecovery } from "./hooks/useRecovery";
 export default function App() {
   const r = useRecovery();
   const s = r.state;
+  const [browserOpen, setBrowserOpen] = useState(false);
 
   const running = s.step === "running";
   const analyzed = s.step === "analyzed" || s.step === "done" || s.step === "failed";
@@ -51,8 +54,18 @@ export default function App() {
             value={s.sourcePath}
             onChange={r.setSourcePath}
             onSubmit={r.analyze}
+            onBrowse={() => setBrowserOpen(true)}
             busy={s.step === "analyzing"}
             submitLabel="Analyser"
+          />
+
+          <FileBrowser
+            open={browserOpen}
+            onClose={() => setBrowserOpen(false)}
+            onChoose={(rel) => {
+              setBrowserOpen(false);
+              void r.pickSource(rel);
+            }}
           />
 
           {s.step === "idle" && s.error && <ErrorBanner error={s.error} />}

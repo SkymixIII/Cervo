@@ -10,9 +10,10 @@ interface Props {
   disabled?: boolean;
   submitLabel: string;
   placeholder?: string;
+  onBrowse?: () => void; // ouvre le navigateur de fichiers (incrément 06)
 }
 
-export function FileInput({ label, value, onChange, onSubmit, busy, disabled, submitLabel, placeholder }: Props) {
+export function FileInput({ label, value, onChange, onSubmit, busy, disabled, submitLabel, placeholder, onBrowse }: Props) {
   return (
     <div className="field">
       <label className="field-label">{label}</label>
@@ -28,6 +29,11 @@ export function FileInput({ label, value, onChange, onSubmit, busy, disabled, su
           }}
           disabled={busy}
         />
+        {onBrowse && (
+          <button className="btn" onClick={onBrowse} disabled={busy} title="Parcourir les disques montés">
+            Parcourir…
+          </button>
+        )}
         <button className="btn" onClick={onSubmit} disabled={busy || disabled || !value.trim()}>
           {busy ? "…" : submitLabel}
         </button>
