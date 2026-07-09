@@ -8,13 +8,14 @@ interface Props {
   value: string;
   onChange: (v: string) => void;
   onCheck: () => void;
+  onBrowse?: () => void; // ouvre le navigateur de fichiers (même modale que la source)
   busy: boolean;
   referenceId: string | null;
   compat: CompatCheck | null;
   error: string | null;
 }
 
-export function ReferenceFileInput({ value, onChange, onCheck, busy, referenceId, compat, error }: Props) {
+export function ReferenceFileInput({ value, onChange, onCheck, onBrowse, busy, referenceId, compat, error }: Props) {
   return (
     <div className="field field-ref">
       <label className="field-label">
@@ -29,6 +30,11 @@ export function ReferenceFileInput({ value, onChange, onCheck, busy, referenceId
           onChange={(e) => onChange(e.target.value)}
           disabled={busy}
         />
+        {onBrowse && (
+          <button className="btn" onClick={onBrowse} disabled={busy} title="Parcourir les disques montés">
+            Parcourir…
+          </button>
+        )}
         <button className="btn" onClick={onCheck} disabled={busy || !value.trim()}>
           {busy ? "…" : "Vérifier"}
         </button>
