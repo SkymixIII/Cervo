@@ -22,7 +22,8 @@ import { useRecovery } from "./hooks/useRecovery";
 export default function App() {
   const r = useRecovery();
   const s = r.state;
-  const [browserOpen, setBrowserOpen] = useState(false);
+  // Navigateur partagé : cible le champ source OU référence (même modale, même endpoint).
+  const [browseTarget, setBrowseTarget] = useState<"source" | "reference" | null>(null);
 
   const running = s.step === "running";
   const analyzed = s.step === "analyzed" || s.step === "done" || s.step === "failed";
@@ -54,17 +55,19 @@ export default function App() {
             value={s.sourcePath}
             onChange={r.setSourcePath}
             onSubmit={r.analyze}
-            onBrowse={() => setBrowserOpen(true)}
+            onBrowse={() => setBrowseTarget("source")}
             busy={s.step === "analyzing"}
             submitLabel="Analyser"
           />
 
           <FileBrowser
-            open={browserOpen}
-            onClose={() => setBrowserOpen(false)}
+            open={browseTarget !== null}
+            onClose={() => setBrowseTarget(null)}
             onChoose={(rel) => {
-              setBrowserOpen(false);
-              void r.pickSource(rel);
+              const target = browseTarget;
+              setBrowseTarget(null);
+              if (target === "reference") r.setReferencePath(rel);
+              else void r.pickSource(rel);
             }}
           />
 
@@ -94,6 +97,7 @@ export default function App() {
                   value={s.referencePath}
                   onChange={r.setReferencePath}
                   onCheck={r.attachReference}
+                  onBrowse={() => setBrowseTarget("reference")}
                   busy={s.refBusy}
                   referenceId={s.referenceId}
                   compat={s.compat}
